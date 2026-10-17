@@ -24,6 +24,11 @@ namespace Vulkan {
 /// be). Logged once per kind ("image", "buffer").
 void NoteOverBudget(const char* what);
 
+/// bbport: VRAM nearly full on a discrete GPU: new textures go to system memory, and VMA's
+/// budget counts the driver's usage (VK_EXT_memory_budget). BB_VRAM_SYSTEM_FALLBACK=0 turns
+/// both off (1.8.2's behaviour), to compare on 6-8 GB cards.
+bool VramSystemFallback();
+
 class Instance {
 public:
     explicit Instance(bool validation = false, bool crash_diagnostic = false);

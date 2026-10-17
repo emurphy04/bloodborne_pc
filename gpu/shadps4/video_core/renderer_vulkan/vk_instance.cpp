@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 
 namespace Vulkan {
 
@@ -32,6 +33,19 @@ void NoteOverBudget(const char* what) {
                     what);
         std::fflush(stdout);
     }
+}
+
+bool VramSystemFallback() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_VRAM_SYSTEM_FALLBACK");
+        const bool on = !(env && env[0] == '0');
+        if (!on) {
+            std::printf("GPU: VRAM system memory fallback off (BB_VRAM_SYSTEM_FALLBACK=0)\n");
+            std::fflush(stdout);
+        }
+        return on;
+    }();
+    return enabled;
 }
 
 namespace {
@@ -731,7 +745,7 @@ void Instance::CreateAllocator() {
     // 4 GB cards textures filled VRAM next to 2-3 GB of backing, and the next area's backing
     // found no room ("ErrorOutOfDeviceMemory"; on NVIDIA it can only be in VRAM).
     VmaAllocatorCreateFlags allocator_flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
-    if (supports_memory_budget) {
+    if (supports_memory_budget && VramSystemFallback()) {
         allocator_flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     }
     const VmaAllocatorCreateInfo allocator_info = {

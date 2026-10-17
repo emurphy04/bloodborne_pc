@@ -40,7 +40,7 @@ PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # This build; GitHub release tags are windows-v<VERSION>.
-VERSION = '1.9-staging'
+VERSION = '1.9-staging.2'
 # Co-op: the community server that answers the game's own server requests.
 COMMUNITY_SERVER = 'https://thehuntersdream.com'
 RELEASES_API = 'https://api.github.com/repos/Supermedo/bloodborne_pc/releases/latest'
@@ -203,7 +203,7 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'
                 'voice_language': 'auto',
                 'player_name': '', 'fullscreen': False, 'hdr': False, 'present_mode': 'Mailbox',
                 'fps_mode': 'uncap', 'frame_cap': '', 'draw_pipe': '', 'readbacks': '',
-                'frames_ahead': '', 'frame_stats': False, 'gpu_profile': False,
+                'frames_ahead': '', 'vram_system_fallback': True, 'frame_stats': False, 'gpu_profile': False,
                 'vk_validation': False, 'extra_env': '', 'close_on_play': False,
                 'check_updates': True, 'online': False, 'online_server': 'srv.shadps4.net:31313',
                 'online_webapi': '', 'online_npid': '', 'online_password': '', 'online_upnp': True,
@@ -487,6 +487,8 @@ def game_environment(s):
     for key, name in (('draw_pipe', 'BB_DRAW_PIPE'), ('readbacks', 'BB_READBACKS'), ('frames_ahead', 'BB_FRAMES_AHEAD')):
         if s[key]:
             env[name] = s[key]
+    if not s.get('vram_system_fallback', True):
+        env['BB_VRAM_SYSTEM_FALLBACK'] = '0'
     for key, name in (('frame_stats', 'BB_FRAME_STATS'), ('gpu_profile', 'BB_GPU_PROFILE'),
                       ('vk_validation', 'BB_VK_VALIDATION')):
         if s[key]:
@@ -1706,6 +1708,9 @@ class Launcher:
                  _('How exactly data the GPU writes is copied back for the game.',
                    'Насколько точно данные, записанные GPU, возвращаются игре.'))
         self.section(f, _('Diagnostics', 'Для разработчика'))
+        self.check(f, 'vram_system_fallback', 'app',
+                   _('Textures to system memory when video memory is nearly full',
+                     'Текстуры в системную память, когда видеопамять почти заполнена'))
         self.check(f, 'frame_stats', 'app', _('Frame statistics in the log (every 5 s)', 'Статистика кадров в журнале (раз в 5 с)'))
         self.check(f, 'gpu_profile', 'app', _('GPU time per pass in the log', 'Профиль GPU в журнале'))
         self.check(f, 'vk_validation', 'app', _('Vulkan validation layers (needs the Vulkan SDK; much slower)',

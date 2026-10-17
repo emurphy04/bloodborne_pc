@@ -29,6 +29,9 @@ namespace {
 /// memory instead (slower, but the next area still finds room; ErrorOutOfDeviceMemory on 4 GB
 /// cards otherwise). Integrated GPUs (Steam Deck) keep their own rules.
 u32 SystemMemoryTypesNearVramLimit(VmaAllocator allocator) {
+    if (!VramSystemFallback()) {
+        return 0;
+    }
     const VkPhysicalDeviceProperties* device{};
     vmaGetPhysicalDeviceProperties(allocator, &device);
     if (device->deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
