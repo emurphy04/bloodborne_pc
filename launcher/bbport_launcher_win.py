@@ -42,23 +42,41 @@ PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # This build; GitHub release tags are windows-v<VERSION>.
-VERSION = '1.9.5'
+VERSION = '1.9.8'
 # A beta of VERSION (its number), or 0: shown as 'v1.9.5 beta 1', and the release of VERSION itself is
 # offered as its update.
-BETA = 0
+BETA = 5
 VERSION_TEXT = f'{VERSION} beta {BETA}' if BETA else VERSION
-BETA_PAGE = 'https://github.com/emurphy04/bloodborne_pc/releases/tag/v1.9.5-beta.10'
+BETA_PAGE = 'https://github.com/Bloodborne-Port-supermedo/bbport-supermedo/releases'
 # The port's Discord application (discord.com/developers: its Application ID; an art asset named
 # "bloodborne" is the picture). Empty: no Discord status, and its setting is not shown.
 DISCORD_APPLICATION_ID = '1563260197835907232'
 # Co-op: the community server that answers the game's own server requests.
 COMMUNITY_SERVER = 'https://game.supermedo.com'
-# The Hunter's Dream, for its own pool (for the time being; BB_HUNTERS_DREAM=0 hides it): its sign-in, player
+# The Hunter's Dream, for its own pool (off since 1.9.7; BB_HUNTERS_DREAM=1 shows it again): its sign-in, player
 # count and game server.
 HUNTERS_DREAM_SERVER = 'https://thehuntersdream.com'
 # SuperMedo Server: the shadNet server (accounts, bells and summons) and the game server above,
 # both supermedo.com's own.
 SUPERMEDO_SERVER, SUPERMEDO_WEBAPI = 'np.supermedo.com:31313', 'http://np.supermedo.com:31315'
+# SuperMedo Seamless co-op (beta): BBSC's seamless co-op on supermedo.com's own seamless server, with the same
+# SuperMedo account (both servers share one account database). The game starts through BBSC's bbsc-launch.exe
+# (bbsc\ next to the launcher), which runs bin\bb-probe.exe with its mod; its game server speaks HTTP.
+SEAMLESS_SERVER, SEAMLESS_WEBAPI = 'seamless.supermedo.com:31313', 'http://seamless.supermedo.com:31315'
+SEAMLESS_GAME_SERVER = 'http://seamless.supermedo.com:20443'
+BBSC_LAUNCH = PORT_DIR / 'bbsc' / 'bbsc-launch.exe'
+
+
+def plays_seamless(s):
+    """A start with these settings plays SuperMedo Seamless co-op (BBSC: game_environment sets its BB_PROBE)."""
+    return bool(s.get('online')) and s.get('online_pool') == 'seamless' and BBSC_LAUNCH.exists()
+
+
+def saves_user_dir(s):
+    """The folder whose saves a start with these settings plays and the Saves page shows: Seamless co-op keeps
+    its own characters (run.py COOP_SAVES), apart from the normal ones it would change."""
+    user = Path(s.get('user_dir') or DATA_DIR / 'user')
+    return user / saves.COOP_SAVES if plays_seamless(s) else user
 RELEASES_API = 'https://api.github.com/repos/Supermedo/bloodborne_pc/releases/latest'
 RELEASES_PAGE = 'https://github.com/Supermedo/bloodborne_pc/releases/latest'
 # The community site (install guide, FAQ, forum), linked from the side bar.
@@ -66,12 +84,15 @@ COMMUNITY_SITE = 'https://bbport.de/'
 RELEASES_LIST_API = 'https://api.github.com/repos/Supermedo/bloodborne_pc/releases?per_page=100'
 # The betas (pre-releases v<VERSION>-beta.<N>): a beta asks here too, for the next one (update_to_offer).
 BETAS_API = 'https://api.github.com/repos/emurphy04/bloodborne_pc/releases?per_page=30'
-# The oldest version Advanced > Other versions offers: older ones cannot install themselves the
-# same way (--install-update) or read today's settings.
+# The oldest version Advanced > Other versions offers: older ones cannot read today's settings. (A copy of
+# this launcher installs it, whatever version: update_installer.)
 OLDEST_INSTALLABLE = '1.8.2'
+# The downloads, one folder per update (install_version); cleared at a start without an update underway.
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'bbport-update'
-# Never copied over an installation by an update (the package does not hold them either).
+# Never put in place by an update (bbport_update.stage), whatever the package holds.
 USER_FILES = ('user', 'out', 'mods', 'fsr4vk', 'bbport.ini', 'input.ini', 'mods.json', 'patches.json', 'last_run.log')
+# The GitHub asset's digest ("sha256:…") by download URL, noted by game_zip: the download is checked against it.
+ASSET_DIGESTS = {}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -244,7 +265,16 @@ import bbport_lang_pools  # noqa: E402,F401 (the co-op pools' texts with The Hun
 import bbport_lang_mistakes  # noqa: E402,F401 (the repairs of player mistakes, in the other eleven languages)
 import bbport_lang_vram  # noqa: E402,F401 (the video memory warning's switch)
 import bbport_lang_latency  # noqa: E402,F401 (the low latency options)
+import bbport_lang_gpu  # noqa: E402,F401 (a graphics card Windows has and Vulkan does not see)
+import bbport_lang_ready  # noqa: E402,F401 (the start's other prerequisites: runtime, folders, firewall)
+import bbport_lang_audit1  # noqa: E402,F401 (the launcher's own update: its checks and the installer's window)
+import bbport_lang_audit2  # noqa: E402,F401 (the wrong and stale texts of the launcher check, rewritten)
+import bbport_lang_audit3  # noqa: E402,F401 (background work that no longer ends without a word, the shader cache)
+import bbport_lang_audit4  # noqa: E402,F401 (the search: the side bar's buttons, notes for other choices)
+import bbport_lang_audit5  # noqa: E402,F401 (Help's new order: asking for help above the problems)
+import bbport_lang_audit8  # noqa: E402,F401 (sharpening with FSR 4, achievements from another installation)
 import bbport_lang_news  # noqa: E402,F401 (the What's new window)
+import bbport_lang_thd  # noqa: E402,F401 (1.9.7: The Hunter's Dream no longer offered)
 import bbport_lang_readouts  # noqa: E402,F401 (the FPS counter's lines)
 # Last of the texts: it builds bbport_lang's tables (table()) to add its own, so a module registering
 # EXTRA_TRANSLATIONS after it would not be in them.
@@ -260,9 +290,12 @@ import bbport_help  # noqa: E402
 import bbport_search  # noqa: E402
 import bbport_setup  # noqa: E402
 import bbport_news  # noqa: E402
+import bbport_seamless  # noqa: E402
+import bbport_signin  # noqa: E402
 import bbport_trophies as trophies  # noqa: E402
 import bbport_theme as theme  # noqa: E402
 import bbport_tls  # noqa: E402 (every HTTPS request: no expired certificates of the stores, Windows' trust)
+import bbport_update as updater  # noqa: E402 (the launcher's own update: checked, swapped in by renaming)
 from bbport_trophy_icons import TrophyIcons  # noqa: E402
 from bbport_input_config import (STICK_OUTPUTS, OUTPUT_LABELS, ACTION_GROUPS, SLOTS, keysym_to_name,
                                   button_num_to_name, input_ini_path, load_input_ini, reserved_keys,
@@ -377,13 +410,13 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'
                 'voice_language': 'auto',
                 'player_name': '', 'fullscreen': False, 'exclusive_fullscreen': False, 'hdr': False, 'present_mode': 'Mailbox',
                 'fps_mode': 'uncap', 'frame_cap': '', 'draw_pipe': '', 'readbacks': '', 'low_vram': '', 'vram_warning': True,
-                'frames_ahead': '', 'low_latency': 'off', 'async_pipelines': '', 'vrr': '', 'early_submit': '', 'frame_stats': False, 'gpu_profile': False,
+                'frames_ahead': '', 'low_latency': 'auto', 'low_latency_auto': True, 'async_pipelines': '', 'vrr': '', 'early_submit': '', 'frame_stats': False, 'gpu_profile': False,
                 'vk_validation': False, 'extra_env': '', 'close_on_play': False,
                 'on_play': 'stay', 'reopen_after_game': False, 'minimize_to_tray': False, 'discord_status': True,
                 'menu_key': 'Insert', 'menu_pad': 'l3+r3',
                 'check_updates': True, 'save_backups': False, 'online': False, 'online_server': 'srv.shadps4.net:31313',
                 'online_webapi': '', 'online_npid': '', 'online_password': '', 'online_upnp': True,
-                'online_custom_servers': False, 'supermedo_npid': '', 'supermedo_pass': '',
+                'online_custom_servers': False, 'supermedo_npid': '', 'supermedo_pass': '', 'party_key': '',
                 'online_community': COMMUNITY_SERVER, 'online_pool': 'supermedo', 'bridge_live_map': False,
                 'thd_online_id': '', 'thd_token': '',
                 # The setup guide ran (or the launcher was set up before it existed); a graphics card
@@ -391,9 +424,12 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'
                 'setup_done': False, 'gpu_override': '',
                 # Graphics settings made for the hardware (bbport_setup.auto_settings): on/off, the
                 # hardware they were made for, and what they replaced (Undo); the settings right
-                # after they were applied (a later difference is the player's own) and the graphics
-                # cards this PC has shown (a laptop's two are no new hardware when they take turns).
-                'auto_graphics': True, 'auto_hw': '', 'auto_undo': {}, 'auto_applied': {}, 'auto_gpus': [],
+                # after they were applied (a later difference is the player's own) and the hardware
+                # their upscaler was chosen for (one chosen by hand for another card is no choice for a
+                # new one); the graphics cards this PC has shown (a laptop's two are no new hardware when
+                # they take turns).
+                'auto_graphics': True, 'auto_hw': '', 'auto_undo': {}, 'auto_applied': {}, 'auto_applied_hw': '',
+                'auto_gpus': [],
                 'bench_goal': '60',  # the performance test's frame rate goal
                 'eboot_check': {},
                 # The launcher's view: simple (the pages a player needs) or expert (every page); empty
@@ -419,6 +455,7 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'
                 'test_mode': 'performance', 'test_scenario': 'hunters-view', 'test_compare': 'preset',
                 'test_repeats': '1', 'test_minutes': '10', 'test_saves': {}}  # the last check of eboot.bin (bbport_help), kept while the file is unchanged
 # bbbridge's own app reads and writes the online_* keys above: keep their names.
+APP_DEFAULTS.update(bbport_seamless.DEFAULTS)  # Seamless co-op's difficulty and options
 
 UPSCALERS = [('dlss', ('DLSS (NVIDIA GeForce RTX)',)),
              ('fsr4', ('FSR 4 (best quality)', 'FSR 4 (лучшее качество)')),
@@ -520,7 +557,9 @@ FRAME_CAPS = [('', ('Auto: display refresh, max 120 (recommended)', 'Авто: �
               ('240', ('240  ⚠',)), ('0', ('No limit  ⚠', 'Без ограничения  ⚠'))]
 FRAMES_AHEAD = [('', ('1 (default)', '1 (по умолчанию)')), ('2', ('2',)), ('0', ('Unbounded', 'Без ограничения'))]
 # gpu/shadps4/video_core/renderer_vulkan/vk_low_latency.cpp: NVIDIA Reflex or AMD Anti-Lag 2.
-LOW_LATENCY = [('off', ('Off', 'Выкл.')), ('on', ('On', 'Вкл.')), ('boost', ('On + Boost', 'Вкл. + Boost'))]
+# auto: On + Boost on NVIDIA (the GPU keeps its clocks while the game waits on it), off on other GPUs.
+LOW_LATENCY = [('auto', ('Auto (NVIDIA: On + Boost)', 'Авто (NVIDIA: Вкл. + Boost)')), ('off', ('Off', 'Выкл.')),
+               ('on', ('On', 'Вкл.')), ('boost', ('On + Boost', 'Вкл. + Boost'))]
 # vk_pipeline_cache.cpp BB_ASYNC_PIPELINES: new pipelines built on worker threads, their draws skipped meanwhile.
 # gpu/shim/core/emulator_settings.h BB_VRR: V-Sync (FIFO) and a frame cap just below the refresh rate.
 VRR_MODES = [('', ('Off', 'Выкл.')), ('1', ('On (G-Sync / FreeSync)', 'Вкл. (G-Sync / FreeSync)'))]
@@ -646,7 +685,15 @@ def load_ini(legacy_settings=None):
         bad = textfile.keep_bad(ini_path())
         try:
             save_ini(fixed, lines)
-        except OSError:
+        except OSError as error:
+            # Read-only or locked: the file is as it was, so its copy goes again (each load made one more), and
+            # the repaired values hold for this start.
+            if bad:
+                try:
+                    bad.unlink()
+                except OSError:
+                    pass
+            ini_not_written(error, fixed)
             return values, lines
         what = ', '.join(f'{key}={value}' for key, value in fixed.items()) or 'its text as UTF-8'
         textfile.REPAIRS.append(f'Settings: {ini_path()} repaired by hand edits ({what}); '
@@ -663,8 +710,16 @@ def load_ini(legacy_settings=None):
             migrated[key] = fsr411_backend(legacy_settings) if key == 'fsr411_backend' else \
                 '1' if old is True or old == '1' else '0'
     if migrated:
-        save_ini(migrated, lines)
-        return load_ini(legacy_settings)
+        try:
+            save_ini(migrated, lines)
+        except OSError as error:
+            # A read-only or locked bbport.ini kept the launcher from opening: the moved values hold for this
+            # start, and the next one tries again.
+            values.update(migrated)
+            present |= set(migrated)
+            ini_not_written(error, migrated)
+        else:
+            return load_ini(legacy_settings)
     if 'upscaler' not in present:
         env = bbport_fsr411.environment(PORT_DIR, legacy_settings or {})
         support = bbport_fsr41.query(PORT_DIR, env)
@@ -705,6 +760,15 @@ def save_ini(values, lines):
         out.append('# bbport settings (in-game menu: Insert / L3+R3)')
     out += [f'{key}={value}' for key, value in values.items() if key not in written]
     textfile.write(ini_path(), '\n'.join(out) + '\n')
+
+
+def ini_not_written(error, values):
+    """A line for the log (once) when bbport.ini cannot be written (read-only, held by another program): the
+    launcher goes on with `values` in memory instead of stopping."""
+    line = (f'Settings: {ini_path()} cannot be written ({error}); this start goes on without saving '
+            + (', '.join(f'{key}={value}' for key, value in values.items()) or 'its text as UTF-8'))
+    if line not in textfile.REPAIRS:
+        textfile.REPAIRS.append(line)
 
 
 def game_info(folder):
@@ -816,6 +880,8 @@ def game_server(s):
         return community_address(s.get('online_community', ''))
     if s.get('online_pool') == 'huntersdream' and HUNTERS_DREAM_POOL:
         return HUNTERS_DREAM_SERVER
+    if s.get('online_pool') == 'seamless':
+        return SEAMLESS_GAME_SERVER
     return COMMUNITY_SERVER
 
 
@@ -852,6 +918,8 @@ def settled_pool(s, env=None):
     pool = s.get('online_pool')
     if pool == 'huntersdream' and HUNTERS_DREAM_POOL:
         return pool
+    if pool == 'seamless' and BBSC_LAUNCH.exists():
+        return pool
     if started_by_bbsc(env) and ((pool == 'shadnet' and s.get('online_custom_servers')) or bbsc_server_saved(s, env)):
         return 'shadnet'
     return 'supermedo'
@@ -880,23 +948,39 @@ def settled_online(app, saved):
     return settled
 
 
+def chosen_pool(s):
+    """The pool a start plays on: The Hunter's Dream's players play on SuperMedo Server while it is not offered
+    (since 1.9.7), before the window or settled_pool has rewritten their choice."""
+    pool = s.get('online_pool', 'supermedo')
+    return 'supermedo' if pool == 'huntersdream' and not HUNTERS_DREAM_POOL else pool
+
+
 def pool_account(s):
     """The account the game signs in with on the chosen pool, '' without one. Each pool keeps its own, so a
     change of pool (or a co-op tool writing the shadNet boxes) never signs another one out: SuperMedo Server's
     account, The Hunter's Dream's Discord sign-in, the shadNet boxes."""
-    pool = s.get('online_pool', 'supermedo')
+    pool = chosen_pool(s)
     if pool == 'huntersdream':
         return str(s.get('thd_online_id', '')).strip() if s.get('thd_token') else ''
-    if pool == 'supermedo':
+    if pool in ('supermedo', 'seamless'):  # one account for both SuperMedo servers
         return str(s.get('supermedo_npid', '')).strip() if s.get('supermedo_pass') else ''
     return str(s.get('online_npid', '')).strip()
+
+
+def signed_out_server(s):
+    """With online on: the name of the chosen server when the launcher has no account for it (SuperMedo Server
+    or The Hunter's Dream), else ''. A Seamless co-op start (shadnet) brings its own."""
+    pool = chosen_pool(s)
+    if not s.get('online') or pool not in ('supermedo', 'huntersdream') or pool_account(s):
+        return ''
+    return "The Hunter's Dream" if pool == 'huntersdream' else 'SuperMedo Server'
 
 
 # The Online page's settings in settings.json. A co-op tool (Seamless co-op) writes shadNet's there; the pool and
 # the SuperMedo Server and The Hunter's Dream sign-ins are the launcher's own.
 SHADNET_KEYS = ('online_server', 'online_webapi', 'online_community', 'online_npid', 'online_password',
                 'online_custom_servers')
-OWN_ONLINE_KEYS = ('online_pool', 'supermedo_npid', 'supermedo_pass', 'thd_online_id', 'thd_token')
+OWN_ONLINE_KEYS = ('online_pool', 'supermedo_npid', 'supermedo_pass', 'party_key', 'thd_online_id', 'thd_token')
 
 
 def outside_online_changes(written, on_disk):
@@ -918,34 +1002,39 @@ def webapi_setting(s):
 
 
 def server_check(server, webapi, community):
-    """A line about each online address: reachable, or why not (runs off the Tk thread)."""
+    """A line about each online address: reachable, or why not (runs off the Tk thread). Every error counts as an
+    answer: a broken HTTP reply (BadStatusLine from a proxy or a virus scanner) is no OSError, and it ended the
+    test's thread with "Checking…" left on the Online page for good."""
     import socket
     lines = []
     try:
-        with bbport_tls.urlopen(community + ':20443/bb-eu/ss.info', timeout=6) as reply:
+        # The game's port, unless the address names its own (Seamless co-op's game server does).
+        base = community if re.search(r':\d+$', community.split('://', 1)[-1]) else community + ':20443'
+        with bbport_tls.urlopen(base + '/bb-eu/ss.info', timeout=6) as reply:
             reply.read(64)
         lines.append(_('Game server {0}: reachable').format(community))
-    except (OSError, ValueError) as error:
-        lines.append(_('Game server {0}: not reachable ({1})').format(community, error))
+    except Exception as error:
+        lines.append(_('Game server {0}: not reachable ({1})').format(community, error_text(error)))
     host, _sep, port = server.rpartition(':')
     try:
         socket.create_connection((host or server, int(port or 31313)), timeout=4).close()
         lines.append(_('Server {0}: reachable').format(server))
-    except (OSError, ValueError) as error:
-        lines.append(_('Server {0}: not reachable ({1})').format(server, error))
+    except Exception as error:
+        lines.append(_('Server {0}: not reachable ({1})').format(server, error_text(error)))
     try:
         with bbport_tls.urlopen(webapi.rstrip('/') + '/status', timeout=4) as reply:
             ok = b'"ok":true' in reply.read(512).replace(b' ', b'')
         lines.append(_('WebAPI {0}: reachable').format(webapi) if ok else
                      _('WebAPI {0}: answered, but it is not a shadNet server').format(webapi))
-    except (OSError, ValueError) as error:
-        lines.append(_('WebAPI {0}: not reachable ({1})').format(webapi, error))
+    except Exception as error:
+        lines.append(_('WebAPI {0}: not reachable ({1})').format(webapi, error_text(error)))
     return '\n'.join(lines)
 
 
 # The Hunter's Dream pool: the engine's own backend for it (BB_NET_BACKEND=thd, bbhost's
-# protocol, from Awaken's port). For the time being, after SuperMedo Server; BB_HUNTERS_DREAM=0 hides it.
-HUNTERS_DREAM_POOL = os.environ.get('BB_HUNTERS_DREAM', '1') != '0'
+# protocol, from Awaken's port). Not offered since 1.9.7: its players move to SuperMedo Server (settled_pool,
+# show_pool) and are told once (bbport_news). BB_HUNTERS_DREAM=1 shows it again.
+HUNTERS_DREAM_POOL = os.environ.get('BB_HUNTERS_DREAM', '0') == '1'
 
 
 SHADNET_ERRORS = {3: 'The name or the email address is not valid.', 4: 'Too soon: try again in a minute.',
@@ -991,8 +1080,75 @@ def shadnet_register(address, npid, password, email, timeout=15):
     return None if error == 0 else SHADNET_ERRORS.get(error, f'The server said no (error {error}).')
 
 
+def shadnet_check_login(address, npid, password, timeout=15):
+    """Whether a shadNet server takes this Online ID and password: its Login command (the LoginRequest
+    protobuf, as the game sends it, with appear_offline so nobody sees the check), then the connection is
+    closed. Returns None, or why it was refused. "Already logged in" means the password is right (the account
+    is online elsewhere, the game itself for example)."""
+    import socket
+    import struct
+
+    def varint(n):
+        out = b''
+        while True:
+            byte, n = n & 0x7F, n >> 7
+            out += bytes([byte | (0x80 if n else 0)])
+            if not n:
+                return out
+
+    def text(field, value):
+        data = value.encode('utf-8')
+        return varint(field << 3 | 2) + varint(len(data)) + data if data else b''
+
+    def read(sock, n):
+        data = b''
+        while len(data) < n:
+            chunk = sock.recv(n - len(data))
+            if not chunk:
+                raise OSError('the server closed the connection')
+            data += chunk
+        return data
+    host, _sep, port = address.rpartition(':')
+    proto = text(1, npid) + text(2, password) + varint(6 << 3) + varint(1)  # appear_offline = true
+    payload = struct.pack('<I', len(proto)) + proto
+    with socket.create_connection((host, int(port)), timeout=timeout) as sock:
+        info = read(sock, 15)
+        read(sock, struct.unpack_from('<I', info, 3)[0] - 15)  # ServerInfo: the protocol version
+        sock.sendall(struct.pack('<BHIQ', 0, 0, 15 + len(payload), 1) + payload)
+        reply = read(sock, 16)
+    error = reply[15]
+    if error in (0, 6):
+        return None
+    return {7: _('No account has this Online ID.'), 8: _('The password is wrong.')}.get(
+        error, _(SHADNET_ERRORS[error]) if error in SHADNET_ERRORS else _('The server said no (error {}).').format(error))
+
+
 def thd_open(request):
     return bbport_tls.urlopen(request, timeout=10)
+
+
+def party_call(call, body=None, key=''):
+    """A call to SuperMedo Server's parties (/party/v1/<call>): (HTTP status, its JSON answer). The key
+    comes from signin (the SuperMedo account) and stays in the settings (party_key)."""
+    request = urllib.request.Request(COMMUNITY_SERVER + '/party/v1/' + call, data=json.dumps(body or {}).encode(),
+                                     method='POST', headers={'Content-Type': 'application/json',
+                                                             'Authorization': 'Bearer ' + key,
+                                                             'User-Agent': f'bbport-launcher/{VERSION}'})
+    try:
+        with bbport_tls.urlopen(request, timeout=20) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        try:
+            return error.code, json.loads(error.read())
+        except ValueError:
+            return error.code, {'error': str(error)}
+
+
+def party_line(party):
+    """The party's hunters for the Online page: 'Alice (host, online) · Bob (offline)'."""
+    return ' · '.join('{} ({})'.format(m['name'], ', '.join(
+        ([_('host')] if m.get('host') else []) + [_('online') if m.get('online') else _('offline')]))
+        for m in party.get('members', []))
 
 
 def discord_sign_in(server, on_page, timeout=600):
@@ -1088,8 +1244,8 @@ def server_check_hunters_dream():
             lines.append(_('{0}: reachable').format(name))
         except urllib.error.HTTPError:
             lines.append(_('{0}: reachable').format(name))   # it answered
-        except (OSError, ValueError) as error:
-            lines.append(_('{0}: not reachable ({1})').format(name, error))
+        except Exception as error:  # a broken reply too (BadStatusLine): see server_check
+            lines.append(_('{0}: not reachable ({1})').format(name, error_text(error)))
     return '\n'.join(lines)
 
 
@@ -1114,6 +1270,20 @@ def vulkan_verdict(env):
         crashed = result.returncode < 0 or result.returncode >= 0xC0000000
         return {'ok': False, 'problem': 'crashed', 'code': f'0x{result.returncode & 0xffffffff:08X}'} \
             if crashed else None
+
+
+def fsr41_check_failed(error):
+    """bbport_fsr41.query's answer when the check stopped with an error it does not expect: "check failed" with
+    why (bbport_fsr411.query's own shape for a failed probe), not "checking support…" for good."""
+    detail = error_text(error)
+    return {'vendor_id': None, **{method: dict(supported=False, reason='check', detail=detail,
+                                               checks=[dict(id='probe', state='fail', detail=detail)])
+                                  for method in ('vk', 'dx12')}}
+
+
+def fg401_check_failed():
+    """bbport_fg401.query_versions' answer when the check stopped with an error it does not expect."""
+    return {key: dict(supported=False, reason='check', detail='') for key in ('fsr401', 'fsr402')}
 
 
 def motion_cache_available(graphics, unavailable=''):
@@ -1163,7 +1333,7 @@ def hunters_online():
             return None
         clients = sessions.get('by_client') or {}
         return int(sessions.get('count') or 0), int(clients.get('bbhost') or 0), int(clients.get('shadps4') or 0)
-    except (OSError, ValueError, TypeError, AttributeError):
+    except Exception:  # a broken reply too (IncompleteRead): no count, never a dead helper thread
         return None
 
 
@@ -1300,6 +1470,15 @@ def game_environment(s, graphics=None):
             env['BB_SHADNET_WEBAPI'] = SUPERMEDO_WEBAPI
             env['BB_SHADNET_NPID'] = str(s.get('supermedo_npid', '')).strip()
             env['BB_SHADNET_PASSWORD'] = str(s.get('supermedo_pass', ''))
+        if s.get('online_pool') == 'seamless':  # BBSC with the SuperMedo account on the seamless server
+            env['BB_SHADNET_SERVER'] = SEAMLESS_SERVER
+            env['BB_SHADNET_WEBAPI'] = SEAMLESS_WEBAPI
+            env['BB_SHADNET_NPID'] = str(s.get('supermedo_npid', '')).strip()
+            env['BB_SHADNET_PASSWORD'] = str(s.get('supermedo_pass', ''))
+            env['BB_COMMUNITY_SERVER'] = SEAMLESS_GAME_SERVER
+            env['BB_PROBE'] = str(BBSC_LAUNCH)
+            env['BBSC_EMULATOR'] = str(PORT_DIR / 'bin' / 'bb-probe.exe')
+            env.update(bbport_seamless.environment(s))  # the difficulty and options chosen on the Online page
         if s.get('online_pool') == 'huntersdream' and HUNTERS_DREAM_POOL:
             # The engine's Hunter's Dream backend with the Discord-linked account (run.py sets
             # the game server and the backend's addresses).
@@ -1353,6 +1532,24 @@ NAV_EXPERT = [('graphics', ('All graphics',)), ('game', ('Game files',)), ('chea
 EXPERT_PAGES = {name for name, _t in NAV_EXPERT} | {'log'}
 
 
+def nav_plan(room, savings, count, group, px, steps=(37, 26, 23, 22)):
+    """The side bar's entries for the `room` (pixels) their list has under the full head: (their height in
+    points, the head, whether the list scrolls). Head 0 is the full one, 1 has narrower gaps (`savings[0]` pixels
+    more for the list), 2 has no by-line either (`savings[1]`). Each head takes entries from its height in `steps`
+    down to the next one's, never taller than the head before, so more room never makes them flatter; with less
+    room than even the flattest need, the list scrolls. Each entry takes px(height) and a pixel's gap, `group` is
+    the EXPERT label's (0 in the simple view). The entries had stopped at 26 points before: at 700 pixels high
+    the last ones were behind the Expert view switch. The by-line goes last: dropped with the gaps for entries
+    under 26 points, it gave them a point or two and left most of its room empty."""
+    def tallest(space, most, fewest):
+        return next((h for h in range(most, fewest - 1, -1) if group + count * (px(h) + px(1)) <= space), None)
+    for head, (most, fewest) in enumerate(zip(steps, steps[1:])):
+        height = tallest(room + (0, *savings)[head], most, fewest)
+        if height is not None:
+            return height, head, False
+    return steps[-1], len(savings), True
+
+
 class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.SearchMixin, bbport_pad.PadMixin):
     def __init__(self, root, tk, ttk, filedialog, messagebox):
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
@@ -1363,6 +1560,10 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             self.app['online_community'] = COMMUNITY_SERVER
         if self.app.get('readbacks') == '0':  # Off left the launcher (READBACKS)
             self.app['readbacks'] = ''
+        if not saved.get('low_latency_auto'):  # Off was the default until 1.9.8: Auto once (Off chosen again stays)
+            if self.app.get('low_latency') == 'off':
+                self.app['low_latency'] = 'auto'
+            self.app['low_latency_auto'] = True
         self.app.update(settled_online(self.app, saved))  # dead ends to SuperMedo Server
         self.online_written = {key: saved.get(key) for key in SHADNET_KEYS + OWN_ONLINE_KEYS}
         for key in ('supermedo_user', 'supermedo_password'):  # 1.9.2's account, the password in plain text
@@ -1481,10 +1682,11 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         shown.add(text)
         self.messagebox.showerror('Bloodborne', _('Something went wrong in the launcher: {}',
                                                   'В лаунчере произошла ошибка: {}').format(value or kind.__name__) +
-                                  '\n\n' + _('The details are on the Log page. Help > "Save a report" makes the zip to '
-                                             'attach when you ask for help.',
-                                             'Подробности на странице «Журнал». «Помощь» > «Сохранить отчёт» создаёт '
-                                             'zip-файл, который нужно приложить, когда просите о помощи.'))
+                                  '\n\n' + _('The details are in the log (Help > "Show the log"). Help > "Save a '
+                                             'report" makes the zip to attach when you ask for help.',
+                                             'Подробности в журнале («Помощь» > «Показать журнал»). «Помощь» > '
+                                             '«Сохранить отчёт» создаёт zip-файл, который нужно приложить, когда '
+                                             'просите о помощи.'))
 
     def save_settings(self):
         """collect() before PLAY; False with a message when they cannot be written (a folder without write
@@ -1621,7 +1823,12 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.fg401_support = None
         self.refresh_fg401()
         def work():
-            support = bbport_fg401.query_versions(PORT_DIR, bbport_fsr411.environment(PORT_DIR, self.app))
+            try:
+                support = bbport_fg401.query_versions(PORT_DIR, bbport_fsr411.environment(PORT_DIR, self.app))
+            except Exception as error:  # never "checking support…" for good
+                support = fg401_check_failed()
+                self.ui_calls.put(lambda e=error_text(error, kind=True): self.append(
+                    _('The check of the graphics card stopped: {}').format(e) + '\n'))
             def done():
                 self.fg401_support = support
                 self.refresh_fg401()
@@ -1789,10 +1996,10 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                                      variable=self.var('object_motion_cache', 'ini'))
         row = self.next_row(parent)
         button.grid(row=row, column=0, columnspan=2, sticky='w', pady=(8, 0))
-        self.ttk.Label(parent, text=_(
+        self.wrap_within(self.ttk.Label(parent, text=_(
             'May solve general FSR FPS drops; uses extra VRAM. Requires object motion vectors. '
-            'Applies at next game start.'), style='Muted.TLabel', wraplength=self.px(640),
-            justify='left').grid(row=row + 1, column=0, columnspan=2, sticky='w', padx=(26, 0))
+            'Applies at next game start.'), style='Muted.TLabel', justify='left', anchor='w'), 640).grid(
+            row=row + 1, column=0, columnspan=2, sticky='we', padx=(26, 0))
         self.index_entry(button, _('Motion-vector cache (experimental)'), key='object_motion_cache')
 
         def refresh(*_args):
@@ -1819,8 +2026,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         label.grid(row=r, column=0, sticky='w', padx=(0, 18), pady=(6, 0))
         widget.grid(row=r, column=1, sticky='w', pady=(6, 0))
         if hint:
-            ttk.Label(parent, text=hint, style='Muted.TLabel', wraplength=self.px(560), justify='left').grid(
-                row=r + 1, column=1, sticky='w', pady=(2, 2))
+            self.wrap_within(ttk.Label(parent, text=hint, style='Muted.TLabel', justify='left', anchor='w'), 560).grid(
+                row=r + 1, column=1, sticky='we', pady=(2, 2))
         self.index_entry(widget, title, hint, key or self.setting_key_of(widget), mark=label)
         return widget
 
@@ -1831,13 +2038,27 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         box.grid(row=r, column=0, columnspan=2, sticky='w', pady=(4, 0))
         self.index_entry(box, title, hint, key)
         if hint:
-            ttk.Label(parent, text=hint, style='Muted.TLabel', wraplength=self.px(640), justify='left').grid(
-                row=r + 1, column=0, columnspan=2, sticky='w', padx=(26, 0))
+            self.wrap_within(ttk.Label(parent, text=hint, style='Muted.TLabel', justify='left', anchor='w'), 640).grid(
+                row=r + 1, column=0, columnspan=2, sticky='we', padx=(26, 0))
         return box
 
+    def wrap_within(self, label, wrap):
+        """`label` wraps at `wrap` points, or narrower where it has less room: a fixed width ran its lines past
+        the right edge of a narrow window, cut off. Its room is what its parent gives it (packed with fill='x',
+        gridded sticky 'we'), less a few pixels for the label's own border. A label as wide as it asks for has
+        no other room to go by: it stays as it is (else it would narrow itself step by step)."""
+        px = self.px
+
+        def fit(event):
+            if event.width != label.winfo_reqwidth():
+                label.configure(wraplength=max(px(120), min(px(wrap), event.width - px(8))))
+        label.configure(wraplength=px(wrap))
+        label.bind('<Configure>', fit, add='+')
+        return label
+
     def note(self, parent, text, top=12):
-        self.ttk.Label(parent, text=text, style='Muted.TLabel', wraplength=self.px(680), justify='left').grid(
-            row=self.next_row(parent), column=0, columnspan=2, sticky='w', pady=(top, 0))
+        self.wrap_within(self.ttk.Label(parent, text=text, style='Muted.TLabel', justify='left', anchor='w'), 680).grid(
+            row=self.next_row(parent), column=0, columnspan=2, sticky='we', pady=(top, 0))
 
     def fold(self, parent, title, texts, top=10):
         """Details most players never need: a gold link that shows or hides the notes `texts`."""
@@ -1845,8 +2066,9 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         link.grid(row=self.next_row(parent), column=0, columnspan=2, sticky='w', pady=(top, 0))
         notes = []
         for text in texts:
-            label = self.ttk.Label(parent, text=text, style='Muted.TLabel', wraplength=self.px(680), justify='left')
-            label.grid(row=self.next_row(parent), column=0, columnspan=2, sticky='w', pady=(6, 0))
+            label = self.wrap_within(self.ttk.Label(parent, text=text, style='Muted.TLabel', justify='left', anchor='w'),
+                                     680)
+            label.grid(row=self.next_row(parent), column=0, columnspan=2, sticky='we', pady=(6, 0))
             label.grid_remove()
             notes.append(label)
 
@@ -1861,8 +2083,10 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         """A heading in Cinzel with a hairline running to the right edge."""
         head = self.ttk.Frame(parent)
         head.grid(row=self.next_row(parent), column=0, columnspan=2, sticky='we', pady=(top + 6, 6))
-        self.ttk.Label(head, text=title, style='Section.TLabel').pack(side='left')
+        label = self.ttk.Label(head, text=title, style='Section.TLabel')
+        label.pack(side='left')
         self.tk.Frame(head, bg=LINE, height=1).pack(side='left', fill='x', expand=True, padx=(14, 0), pady=(4, 0))
+        return label  # a page that renames its section (the Saves page by kind)
 
     def folder(self, parent, key, title, prompt, hint=None, on_change=None):
         ttk = self.ttk
@@ -1895,8 +2119,13 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             c.create_text(self.px(32), self.px(48), text=title, anchor='w', fill=theme.TEXT_STRONG,
                           font=(theme.HEAD, 21))
             if subtitle:
-                c.create_text(self.px(33), self.px(72), text=subtitle, anchor='nw', fill=theme.TEXT_SOFT,
-                              font=(theme.BODY, 9), width=w - self.px(66))
+                # As wide as the page's cards (its padding and scroll bar lie at the right): it reached the window's
+                # edge. A narrow window wraps it into more lines, and the head grows with them (drawn again).
+                text = c.create_text(self.px(33), self.px(72), text=subtitle, anchor='nw', fill=theme.TEXT_SOFT,
+                                     font=(theme.BODY, 9), width=w - self.px(80))
+                need = max(self.px(118), c.bbox(text)[3] + self.px(14))
+                if need != h:
+                    c.configure(height=need)
 
         def schedule(event):
             if getattr(c, 'pending', None):
@@ -1948,6 +2177,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.side = side
         brand = tk.Frame(side, bg=BG)
         brand.pack(fill='x', padx=px(20), pady=(px(20), px(4)))
+        self.brand = brand
         mark = theme.emblem(px(48), glow=False)
         if mark is not None:
             self.brand_mark = self.theme.photo(mark, BG)
@@ -1956,8 +2186,11 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         words.pack(side='left', fill='x')
         tk.Label(words, text='BLOODBORNE', bg=BG, fg=theme.TEXT_STRONG, font=(theme.HEAD_BOLD, 14)).pack(anchor='w')
         tk.Label(words, text='PC PORT', bg=BG, fg=GOLD, font=(theme.HEAD, 8)).pack(anchor='w')
-        tk.Label(side, text=_('by Super Medo') + f'  ·  v{VERSION_TEXT}' + ('\n' + _('co-op test build') if COOP_TEST else ''),
-                 bg=BG, fg=MUTED, justify='left', font=(theme.BODY, 9)).pack(anchor='w', padx=px(22), pady=(px(2), px(8)))
+        self.byline = tk.Label(side, text=_('by Super Medo') + f'  ·  v{VERSION_TEXT}' +
+                               ('\n' + _('co-op test build') if COOP_TEST else ''),
+                               bg=BG, fg=MUTED, justify='left', font=(theme.BODY, 9))
+        self.byline_pads = ((px(2), px(8)), (0, px(4)))  # its gaps under the full head and the narrower ones
+        self.byline.pack(anchor='w', padx=px(22), pady=self.byline_pads[0])
         self.build_search(side)  # bbport_search: settings and help by the player's own words
         self.nav, self.current_page = {}, None
         # Shorter entries on a short screen, so the expert view (13 pages) still fits.
@@ -1965,11 +2198,32 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.nav_pills = {'on': self.theme.box(224, self.nav_h, 8, CARD, LINE, bg=BG),
                           'hover': self.theme.box(224, self.nav_h, 8, theme.SURFACE, bg=BG)}
         accent = self.theme.box(3, 18, 1.5, theme.BLOOD_LIGHT, bg=CARD)
-        self.nav_group = tk.Label(side, text=_('EXPERT'), bg=BG, fg=MUTED, font=(theme.BODY_SEMI, 8), anchor='w')
+        # The entries lie in a list of their own, laid at the top of the room between the search and the switch:
+        # moved up and down by the wheel when even the flattest entries do not fit (fit_nav, nav_scroll).
+        self.nav_list = tk.Frame(side, bg=BG)
+        self.nav_list.pack(fill='both', expand=True)
+        self.nav_inner = tk.Frame(self.nav_list, bg=BG)
+        self.nav_inner.place(x=0, y=0, relwidth=1)
+        self.nav_scrolls, self.nav_offset, self.nav_head = False, 0, 0
+        # Shown while entries lie above or below the list (nav_scroll): a hairline across its cut edge and a gold
+        # chevron (a link's colour: a click moves the list) in the gutter right of the entries, where it covers no
+        # pill. A small grey caret alone went unseen.
+        self.nav_arrows, self.nav_edges = [], []
+        for glyph, step in (('', -80), ('', 80)):  # ChevronUpMed, ChevronDownMed
+            arrow = tk.Label(self.nav_list, text=glyph, bg=BG, fg=GOLD, font=(theme.ICONS, 8), bd=0, padx=0,
+                             pady=px(3), cursor='hand2')
+            arrow.bind('<Button-1>', lambda _e, step=step: self.nav_scroll(px(step)))
+            arrow.bind('<Enter>', lambda _e, arrow=arrow: arrow.configure(fg=theme.GOLD_LIGHT))
+            arrow.bind('<Leave>', lambda _e, arrow=arrow: arrow.configure(fg=GOLD))
+            self.nav_arrows.append(arrow)
+            self.nav_edges.append(tk.Frame(self.nav_list, bg=LINE, height=1))
+        self.nav_group = tk.Label(self.nav_inner, text=_('EXPERT'), bg=BG, fg=MUTED, font=(theme.BODY_SEMI, 8),
+                                  anchor='w')
         for name, title in NAV_SIMPLE + NAV_EXPERT:
             if name == NAV_EXPERT[0][0]:
                 self.nav_group.pack(fill='x', padx=px(24), pady=(px(8), px(2)))
-            c = tk.Canvas(side, width=px(224), height=px(self.nav_h), bg=BG, highlightthickness=0, bd=0, cursor='hand2')
+            c = tk.Canvas(self.nav_inner, width=px(224), height=px(self.nav_h), bg=BG, highlightthickness=0, bd=0,
+                          cursor='hand2')
             c.pack(padx=px(12), pady=(0, px(1)))
             mid = px(self.nav_h / 2)
             items = {'pill': c.create_image(0, 0, anchor='nw', state='hidden'),
@@ -1981,10 +2235,11 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             c.bind('<Leave>', lambda _e, n=name: self.nav_paint(n))
             self.nav[name] = (c, items)
             self.nav_paint(name)
-        self.nav_filler = tk.Frame(side, bg=BG)
-        self.nav_filler.pack(fill='both', expand=True)
         self.update_box = None
         self.version_window = None  # Advanced > Other versions
+        self.versions_listed = False  # its list arrived: its Install may be used
+        self.updating = False  # an update is being downloaded or started: one at a time (update_buttons)
+        self.installing = False  # its installer is starting and this launcher closes for it (update_installing)
         # The view: the switch never changes a setting, only which pages are shown.
         expert = tk.BooleanVar(value=self.app['ui_mode'] == 'expert')
         self.expert_var = expert
@@ -2002,7 +2257,11 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             c = tk.Canvas(side, width=px(224), height=px(36), bg=BG, highlightthickness=0, bd=0, cursor='hand2')
             c.create_image(0, 0, anchor='nw', image=pills[0], tags='pill')
             c.create_text(px(20), px(18), text=icon, fill=colour, font=(theme.ICONS, 11))
-            c.create_text(px(40), px(18), text=text, fill=colour, anchor='w', font=(theme.BODY_SEMI, 10))
+            label = c.create_text(px(40), px(18), text=text, fill=colour, anchor='w', font=(theme.BODY_SEMI, 10))
+            for size in (9, 8):  # a long translation (German, Polish) ran into the arrow: a size smaller then
+                if c.bbox(label)[2] <= px(198):
+                    break
+                c.itemconfigure(label, font=(theme.BODY_SEMI, size))
             c.create_text(px(208), px(18), text='\u2197', fill=colour, font=(theme.BODY, 10))
             c.bind('<Button-1>', lambda _e, u=url: webbrowser.open(u))
             c.bind('<Enter>', lambda _e, c=c, p=pills[1]: c.itemconfigure('pill', image=p))
@@ -2015,7 +2274,16 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.mode_switch = ttk.Checkbutton(side, text=_('Expert view'), variable=expert, command=self.toggle_mode,
                                            style='Bar.TCheckbutton')  # drawn on the side bar's colour
         self.mode_switch.pack(side='bottom', anchor='w', padx=px(22), pady=(px(4), px(6)), before=self.search_box)
-        side.bind('<Configure>', lambda _e: self.root.after_idle(self.fit_nav))
+        # Found by the search too ("expert view", "website"): the jump marks them where they are.
+        self.index_entry(self.mode_switch, _('Expert view'), key='button:expert')
+        self.index_entry(self.community_buttons[1], site, _('Install guide and FAQ on bbport.de'), key='button:site')
+        # A short window narrows these gaps (their pady: full, narrow) and then takes the by-line away before the
+        # entries get too flat to read (fit_nav).
+        self.head_pads = [(brand, (px(20), px(4)), (px(8), px(2))), (self.search_box, (0, px(10)), (0, px(6))),
+                          (self.mode_switch, (px(4), px(6)), (px(2), px(3))),
+                          (self.community_buttons[1], (px(4), px(14)), (px(4), px(8)))]
+        # The list's room changes with the window and with the update notice above the switch.
+        self.nav_list.bind('<Configure>', lambda _e: self.root.after_idle(self.fit_nav))
         self.apply_mode()
 
         right = tk.Frame(self.root, bg=PANEL)
@@ -2077,40 +2345,87 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.nav_group.pack_forget()
         for name, _title in NAV_EXPERT:
             self.nav[name][0].pack_forget()
-        if expert:
-            self.nav_group.pack(fill='x', padx=px(24), pady=(px(8), px(2)), before=self.nav_filler)
+        if expert:  # after the simple view's entries in the list
+            self.nav_group.pack(fill='x', padx=px(24), pady=(px(8), px(2)))
             for name, _title in NAV_EXPERT:
-                self.nav[name][0].pack(padx=px(12), pady=(0, px(1)), before=self.nav_filler)
+                self.nav[name][0].pack(padx=px(12), pady=(0, px(1)))
         self.root.after_idle(self.fit_nav)
 
     def fit_nav(self):
-        """The side bar's entries as tall as the window allows (37 points, down to 26 on a short
-        window or a high scaling), so that every entry and the switch below them stay visible."""
+        """The side bar's entries as tall as the window allows, so that every entry and the switch below them
+        stay visible (nav_plan): 37 points, 26 on a short window or a high scaling; shorter still, the gaps of
+        the head narrow for entries down to 23 points, and only then does the by-line go, for 22. Only where even
+        that is too tall (a 768 pixels high screen at 125 %, an update notice on the smallest window) does the
+        list scroll, with the page shown kept in view."""
         px = self.px
         try:
-            top = self.search_box.winfo_y() + self.search_box.winfo_height() + px(10)
-            bottom = (self.update_box if self.update_box and self.update_box.winfo_manager() else
-                      self.mode_switch).winfo_y() - px(4)
+            if self.side.winfo_height() < px(200):
+                return  # not laid out yet
+            shown = [name for name in self.nav if self.nav[name][0].winfo_manager()]
+            group = self.nav_group.winfo_reqheight() + px(8) + px(2) if self.nav_group.winfo_manager() else 0
+            full, narrow = (sum(pads) for pads in self.byline_pads)
+            gaps = full - narrow + sum(sum(wide) - sum(tight) for _widget, wide, tight in self.head_pads)
+            savings = (gaps, gaps + narrow + self.byline.winfo_reqheight())
+            # the room the list would have under the full head, also while another one is shown
+            room = self.nav_list.winfo_height() - (0, *savings)[self.nav_head]
         except self.tk.TclError:
             return
-        shown = [name for name in self.nav if self.nav[name][0].winfo_manager()]
-        group = self.nav_group.winfo_reqheight() + px(10) if self.nav_group.winfo_manager() else 0
-        if not shown or bottom - top < px(100):
+        if not shown:
             return
-        height = max(26, min(37, int(((bottom - top - group) / len(shown) - px(1)) / self.dpi)))
-        if height == self.nav_h:
+        height, head, self.nav_scrolls = nav_plan(room, savings, len(shown), group, px)
+        if head != self.nav_head:
+            self.nav_head = head
+            for widget, wide, tight in self.head_pads:
+                widget.pack_configure(pady=tight if head else wide)
+            if head == 2:
+                self.byline.pack_forget()
+            else:
+                self.byline.pack(anchor='w', padx=px(22), pady=self.byline_pads[head], after=self.brand)
+        if height != self.nav_h:
+            self.nav_h = height
+            self.nav_pills = {'on': self.theme.box(224, height, 8, CARD, LINE, bg=BG),
+                              'hover': self.theme.box(224, height, 8, theme.SURFACE, bg=BG)}
+            mid = px(height / 2)
+            for name, (c, items) in self.nav.items():
+                c.configure(height=px(height))
+                c.coords(items['pill'], 0, 0)
+                c.coords(items['bar'], px(1), mid)
+                c.coords(items['icon'], px(22), mid)
+                c.coords(items['label'], px(44), mid)
+                self.nav_paint(name)
+        self.root.after_idle(lambda: self.nav_scroll(reveal=self.current_page))  # the page shown in view
+
+    def nav_scroll(self, pixels=0, reveal=None):
+        """Moves the side bar's list by `pixels` while it scrolls, so that the entry `reveal` is in view if given;
+        at its top while every entry fits. A hairline and a chevron at an edge say that entries lie beyond it."""
+        offset = most = 0
+        try:
+            if self.nav_scrolls:
+                room = self.nav_list.winfo_height()
+                most = max(0, self.nav_inner.winfo_reqheight() - room)
+                offset = self.nav_offset + pixels
+                entry = self.nav.get(reveal, (None,))[0]
+                if entry is not None and entry.winfo_manager():
+                    self.root.update_idletasks()  # where the entries lie in the list now
+                    top = entry.winfo_y()
+                    offset = min(max(offset, top + entry.winfo_reqheight() - room), top)
+                offset = min(most, max(0, int(offset)))
+        except self.tk.TclError:
             return
-        self.nav_h = height
-        self.nav_pills = {'on': self.theme.box(224, height, 8, CARD, LINE, bg=BG),
-                          'hover': self.theme.box(224, height, 8, theme.SURFACE, bg=BG)}
-        mid = px(height / 2)
-        for name, (c, items) in self.nav.items():
-            c.configure(height=px(height))
-            c.coords(items['pill'], 0, 0)
-            c.coords(items['bar'], px(1), mid)
-            c.coords(items['icon'], px(22), mid)
-            c.coords(items['label'], px(44), mid)
-            self.nav_paint(name)
+        if offset != self.nav_offset:
+            self.nav_offset = offset
+            self.nav_inner.place_configure(y=-offset)
+        above, below = offset > 0, offset < most - self.px(2)  # the last entry's gap under it is no entry
+        for arrow, edge, more, rely, side in ((self.nav_arrows[0], self.nav_edges[0], above, 0, 'n'),
+                                              (self.nav_arrows[1], self.nav_edges[1], below, 1, 's')):
+            if more:
+                edge.place(x=self.px(12), rely=rely, anchor=side + 'w', width=self.px(224), height=1)
+                arrow.place(relx=1, rely=rely, anchor=side + 'e')
+                edge.lift()
+                arrow.lift()
+            else:
+                edge.place_forget()
+                arrow.place_forget()
 
     TITLE_ICONS = {'minimize': '\ue921', 'maximize': '\ue922', 'restore': '\ue923', 'close': '\ue8bb'}
 
@@ -2225,7 +2540,10 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
     def wheel(self, event):
         """Scrolls the page in pixels (touchpads send small steps), once per redraw however many
-        wheel events came in meanwhile."""
+        wheel events came in meanwhile. Over the side bar's entries while they scroll: those."""
+        if self.nav_scrolls and str(event.widget).startswith(str(self.nav_list)):
+            self.nav_scroll(int(-event.delta / 120 * self.px(40)))
+            return
         page = self.pages.get(self.current_page)
         if not hasattr(page, 'scroll') or isinstance(event.widget, self.tk.Text) or 'popdown' in str(event.widget):
             return
@@ -2315,6 +2633,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
     def bring_back(self):
         """The launcher in front again: from the tray, the task bar or hidden."""
+        self.__dict__.pop('close_after_steam', None)  # opened again while Add to Steam finished: it stays open
         if self.tray:
             self.tray.hide()
         self.root.deiconify()
@@ -2387,6 +2706,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.current_page = name
         for n in self.nav:
             self.nav_paint(n)
+        self.nav_scroll(reveal=name)  # its entry in view while the side bar's list scrolls
         if name == 'mods':
             self.refresh_lists(only_if_changed=True)
         elif name == 'graphics':
@@ -2402,6 +2722,12 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         elif name == 'trophies':
             self.render_trophies()
         elif name == 'saves':
+            view = getattr(self, 'saves_view', None)
+            if view is not None and getattr(self, 'saves_view_next', None):
+                view.set(self.saves_view_next)  # asked for a kind (Seamless co-op's settings link there)
+            elif view is not None:
+                view.set('seamless' if self.plays_seamless() else 'normal')  # opened: what Play starts with
+            self.saves_view_next = None
             self.refresh_saves(only_if_changed=True)
         elif name == 'system':
             self.update_rating()
@@ -2427,7 +2753,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         ttk.Label(info, text=_('Ready check', 'Проверка'), style='Card.Section.TLabel').pack(anchor='w', pady=(0, px(8)))
         # One line per thing that matters; a line that is not fine leads to its fix with a click.
         self.checks, self.check_lines, self.check_targets = {}, {}, {}
-        for key in ('news', 'system', 'gpu', 'settings', 'game', 'saves', 'online', 'pool', 'cheats', 'fsr4'):
+        for key in ('news', 'system', 'gpu', 'runtime', 'settings', 'game', 'files', 'saves', 'online', 'firewall',
+                    'pool', 'cheats', 'fsr4'):
             line = ttk.Frame(info, style='Inner.TFrame')
             line.pack(fill='x', pady=px(4))
             icon = tk.Label(line, text='', bg=CARD, fg=MUTED, font=(theme.ICONS, 11))
@@ -2465,9 +2792,25 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         toggles.grid(row=5, column=0, sticky='we')
         device = ttk.Frame(toggles, style='Inner.TFrame')
         device.pack(fill='x', pady=(0, px(10)))
-        ttk.Label(device, text=_('You play with'), style='Card.TLabel').pack(side='left')
+        label = ttk.Label(device, text=_('You play with'), style='Card.TLabel')
+        label.pack(side='left')
         switch = self.device_switch(device)
         switch.pack(side='left', padx=(px(12), 0))
+
+        def fit_device(_event=None):
+            # A narrow card (a small window, a longer language) shows the switch without its label: beside it, the
+            # card's edge cut "Keyboard and mouse" off, and under it the card had no room left for Play online.
+            # Its two choices say what it is.
+            wide = device.winfo_width() >= label.winfo_reqwidth() + switch.winfo_reqwidth() + px(16)
+            if wide == getattr(device, 'wide', None):
+                return
+            device.wide = wide
+            label.pack_forget()
+            switch.pack_forget()
+            if wide:
+                label.pack(side='left')
+            switch.pack(side='left', padx=(px(12), 0) if wide else 0)
+        device.bind('<Configure>', fit_device, add='+')
         self.index_entry(switch, _('You play with'), '{}, {}'.format(_('Controller', 'Геймпад'), _(
             'Keyboard and mouse', 'Клавиатура и мышь')), 'play_with')
         ttk.Checkbutton(toggles, text=_('Fullscreen', 'Полный экран'), variable=self.var('fullscreen', 'app'),
@@ -2522,11 +2865,11 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
     def set_goal(self, goal):
         """The player chose a goal: the settings for this PC and that goal, at once (Undo on
-        Picture & performance)."""
+        Picture & performance); an upscaler chosen by hand for this card stays (goal_entries)."""
         self.var('goal', 'app').set(goal)
         chosen = self.recommended()
         if chosen:
-            self.apply_profile(chosen[2])
+            self.apply_profile(self.goal_entries(chosen[2]))
         self.show_goal()
         self.refresh_status()
 
@@ -2631,7 +2974,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                    'game restarts it). On: change output and preset in the game without a restart, at a cost.',
                    'Выкл.: разрешения кроме 1080p задаются патчем при запуске (быстрее). Вкл.: менять в игре '
                    'без перезапуска, но медленнее.'))
-        self.check(f, 'sharpen', 'ini', _('Sharpening (RCAS)', 'Резкость (RCAS)'))
+        self.check(f, 'sharpen', 'ini', _('Sharpening (RCAS)', 'Резкость (RCAS)'),
+                   _('Off with FSR 4: it sharpens by itself, and sharpening on top of it brings flaws along edges.'))
         holder = ttk.Frame(f)
         ttk.Scale(holder, from_=0.0, to=2.0, variable=self.var('sharpness', 'ini'), length=300).pack(side='left')
         value = ttk.Label(holder, width=5)
@@ -2644,8 +2988,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                             _('Less ghosting on characters, cloth and weapons; costs about 5–10% FPS.',
                               'Меньше гостинга на персонажах и одежде; стоит около 5–10% FPS.'))
         # Off on some cards whatever the box says (vk_object_motion.cpp): greyed out, with the reason.
-        reason = self.ttk.Label(f, style='Muted.TLabel', wraplength=self.px(640), justify='left')
-        reason.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', padx=(26, 0))
+        reason = self.wrap_within(self.ttk.Label(f, style='Muted.TLabel', justify='left', anchor='w'), 640)
+        reason.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', padx=(26, 0))
         cache = self.motion_cache_check(f)
 
         def refresh_motion():
@@ -2685,10 +3029,10 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                  self.choice(f, 'low_latency', 'app', LOW_LATENCY),
                  _('Less input lag: the game starts each frame just in time instead of queuing frames for the '
                    'display. NVIDIA Reflex on GeForce, AMD Anti-Lag 2 on Radeon (current drivers); other GPUs ignore '
-                   'it. Boost keeps the GPU clocks up.',
+                   'it. Boost keeps the GPU clocks up. Auto: On + Boost on NVIDIA, off on other GPUs.',
                    'Меньше задержка ввода: игра начинает кадр вовремя, а не копит кадры в очереди. NVIDIA Reflex на '
                    'GeForce, AMD Anti-Lag 2 на Radeon (свежие драйверы); на других GPU не действует. Boost держит '
-                   'частоты GPU высокими.'))
+                   'частоты GPU высокими. Авто: Вкл. + Boost на NVIDIA, выкл. на других GPU.'))
         early = self.row(f, _('Send frames to the GPU in parts', 'Отправлять кадр в GPU частями'),
                  self.choice(f, 'early_submit', 'app', EARLY_SUBMIT),
                  _('The graphics card starts drawing a frame while the rest of it is still being prepared, '
@@ -2698,8 +3042,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                    '2 мс раньше. Немного больше нагрузка на CPU. Новое: выключите, если видите мерцание или '
                    'пропавшие объекты.'))
         # Off on Radeon cards whatever the box says (vk_rasterizer.cpp MaybeSubmitEarly): greyed out, with why.
-        early_reason = self.ttk.Label(f, style='Muted.TLabel', wraplength=self.px(560), justify='left')
-        early_reason.grid(row=self.next_row(f), column=1, sticky='w', pady=(0, 2))
+        early_reason = self.wrap_within(self.ttk.Label(f, style='Muted.TLabel', justify='left', anchor='w'), 560)
+        early_reason.grid(row=self.next_row(f), column=1, sticky='we', pady=(0, 2))
 
         def refresh_early():
             if not early.winfo_exists():
@@ -2738,8 +3082,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                    'частотой (120 Гц и выше при 60 FPS); иначе генерация приостанавливается. Немного добавляет '
                    'задержку ввода. Меню и ролики не генерируются. DLSS нужна GeForce RTX 40 или новее, иначе '
                    'используется FSR 3.1.'))
-        self.fg401_status = self.ttk.Label(f, wraplength=self.px(640), justify='left', style='Muted.TLabel')
-        self.fg401_status.grid(row=self.next_row(f), column=1, sticky='w', pady=(4, 0))
+        self.fg401_status = self.wrap_within(self.ttk.Label(f, justify='left', anchor='w', style='Muted.TLabel'), 640)
+        self.fg401_status.grid(row=self.next_row(f), column=1, sticky='we', pady=(4, 0))
         self.fg401_recheck = ttk.Frame(f)
         self.fg401_recheck.grid(row=self.next_row(f), column=1, sticky='w', pady=(6, 0))
         ttk.Button(self.fg401_recheck, text=_('Recheck support'), command=self.recheck_fg401).pack(side='left')
@@ -2756,8 +3100,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                      'Вкл.: не больше кадров, чем показывает монитор (при снятом ограничении FPS генерируется меньше, '
                      'видеокарта меньше нагружена). Выкл.: множитель как выбран.'))
         self.section(f, _('FSR 4 assets', 'Ассеты FSR 4'))
-        self.fsr4_label = ttk.Label(f, text='', wraplength=self.px(640), justify='left', style='Muted.TLabel')
-        self.fsr4_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w')
+        self.fsr4_label = self.wrap_within(ttk.Label(f, text='', justify='left', anchor='w', style='Muted.TLabel'), 640)
+        self.fsr4_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we')
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8, 0))
         self.fsr4_button = ttk.Button(holder, text=_('Download FSR 4 assets', 'Скачать ассеты FSR 4'),
@@ -2772,10 +3116,11 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                        'в папку fsr4_shaders порта.'), top=6)
         before = set(f.grid_slaves())
         self.section(f, _('FSR 4.1.1 (experimental)', 'FSR 4.1.1 (экспериментально)'))
-        self.fsr411_label = ttk.Label(f, text='', wraplength=self.px(640), justify='left', style='Muted.TLabel')
-        self.fsr411_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w')
-        self.fsr411_native_label = ttk.Label(f, text='', wraplength=self.px(640), justify='left', style='Muted.TLabel')
-        self.fsr411_native_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w')
+        def muted():
+            return self.wrap_within(ttk.Label(f, text='', justify='left', anchor='w', style='Muted.TLabel'), 640)
+        self.fsr411_label, self.fsr411_native_label = muted(), muted()
+        self.fsr411_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we')
+        self.fsr411_native_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we')
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8, 0))
         self.fsr411_button = ttk.Button(holder, text=_('Download fsr4vk'),
@@ -2787,6 +3132,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.ttk.Button(holder, text=_('Recheck support'), command=self.recheck_fsr411).pack(side='left')
         self.note(f, _('Download fsr4vk here. AMD DX12 is included.'), top=6)
         fsr411_asset_rows = list(set(f.grid_slaves()) - before)
+        self.index_only(fsr411_asset_rows, _('only with FSR 4.1.1'), 'upscaler')  # found, and the jump marks Upscaler
 
         def show_fsr411(*_a):
             for widget in fsr411_rows:
@@ -2801,12 +3147,16 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
     def link_row(self, parent, text, page, link=None, command=None):
         """A muted line with a link to another page (or to `command`)."""
         row = self.ttk.Frame(parent)
-        row.grid(row=self.next_row(parent), column=0, columnspan=2, sticky='w', pady=(4, 0))
-        self.ttk.Label(row, text=text, style='Muted.TLabel').pack(side='left')
+        row.grid(row=self.next_row(parent), column=0, columnspan=2, sticky='we', pady=(4, 0))
+        words = self.ttk.Label(row, text=text, style='Muted.TLabel', justify='left')
+        words.pack(side='left')
         label = self.tk.Label(row, text=(link or _('Open')) + '  ›', bg=PANEL, fg=GOLD, cursor='hand2',
                               font=(theme.BODY_MEDIUM, 9))
         label.pack(side='left', padx=(8, 0))
         label.bind('<Button-1>', lambda _e: command() if command else self.show(page))
+        # The text wraps where the link would no longer fit beside it: a long translation (Russian) cut it off.
+        row.bind('<Configure>', lambda e: words.configure(
+            wraplength=max(self.px(120), e.width - label.winfo_reqwidth() - 8 - self.px(8))))
         return label
 
     def build_game(self):
@@ -2823,14 +3173,15 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.folder(f, 'dlc_dir', _('DLC folder'), _('Choose the DLC folder'),
                     _('Your add-ons, one folder each named like SPEXPANSIONDLC03 (The Old Hunters). Only '
                       'needed with the base game alone; the Game of the Year edition (CUSA03173) has it.'))
-        dlc = self.tk.Label(f, text='', bg=PANEL, font=(theme.BODY, 9), justify='left', anchor='w')
-        dlc.grid(row=self.next_row(f), column=1, sticky='w', pady=(4, 2))
+        dlc = self.wrap_within(self.tk.Label(f, text='', bg=PANEL, font=(theme.BODY, 9), justify='left', anchor='w'),
+                               560)
+        dlc.grid(row=self.next_row(f), column=1, sticky='we', pady=(4, 2))
 
         def dlc_shown(*_a):
             kind, text = dlc_status(self.var('game_dir', 'app').get(), self.var('dlc_dir', 'app').get().strip(),
                                     self.var('user_dir', 'app').get() or DATA_DIR / 'user')
             mark = {'ok': '✓', 'warn': '!', 'none': '–'}[kind]
-            dlc.configure(text=f'{mark}  {text}', wraplength=self.px(560),
+            dlc.configure(text=f'{mark}  {text}',
                           fg={'ok': theme.GOLD_LIGHT, 'warn': theme.AMBER, 'none': MUTED}[kind])
         for key in ('game_dir', 'dlc_dir', 'user_dir'):
             self.var(key, 'app').trace_add('write', lambda *_a: self.root.after_idle(dlc_shown))
@@ -2910,6 +3261,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                                  'play-through.', 'Патчи игры для версии 1.09, применяются при запуске. Для обычного '
                                  'прохождения оставьте их выключенными.'))
         self.version_warning(f)
+        self.note(f, _('Offline only: when you play online, the game starts without them, fair to the other '
+                       'players.'), top=0)
         self.section(f, _('Cheats', 'Читы'), top=4)
         for key, title, _on in CHEATS:
             self.check(f, key, 'ini', _(*title))
@@ -3023,39 +3376,84 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
     def build_online(self):
         ttk = self.ttk
-        f = self.scrolled_page('online', _('Online co-op'),
+        f = self.scrolled_page('online', _('Online play'),
                                _('Messages, bloodstains and ghosts come from the game server; bells and summons '
                                  'go through a shadNet server.'))
         self.check(f, 'online', 'app', _('Play online'),
-                   _('Off: the game stays offline, as before.'))
+                   _('Off: the game stays offline, as before.') + ' ' +
+                   _('Cheats, debug features and third-party patches run offline only.'))
         self.var('online', 'app').trace_add('write', lambda *_a: self.refresh_status())
+        # Where the player stands, in one line above everything: online where and as whom, or what is missing.
+        state_line = self.wrap_within(ttk.Label(f, text='', justify='left', anchor='w'), 680)
+        state_line.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=(self.px(10), 0))
         self.section(f, _('Co-op pool'))
         pool = self.var('online_pool', 'app')
         pool.trace_add('write', lambda *_a: (self.refresh_status(), self.root.after_idle(self.ask_hunters)))
         # SuperMedo Server first (the default), The Hunter's Dream (the previous server) for the time being. An own
         # server only for Seamless co-op's own start (settled_pool): other servers confused players about where
         # they played. Each keeps its own account (pool_account): switching back and forth signs none out.
-        pools = ttk.Frame(f)
-        ttk.Radiobutton(pools, text=_('SuperMedo Server (recommended)') if HUNTERS_DREAM_POOL else
-                        _('SuperMedo Server'), variable=pool, value='supermedo').pack(side='left', padx=(0, 16))
-        if HUNTERS_DREAM_POOL:
-            ttk.Radiobutton(pools, text=_("The Hunter's Dream (previous server)"), variable=pool,
-                            value='huntersdream').pack(side='left', padx=(0, 16))
-        elif pool.get() == 'huntersdream':
+        # Each server is a tab: choosing one shows only its settings (show_pool below).
+        tabs = []
+        if not BBSC_LAUNCH.exists() and pool.get() == 'seamless':
+            pool.set('supermedo')
+        if not HUNTERS_DREAM_POOL and pool.get() == 'huntersdream':
             pool.set('supermedo')
         bbsc = started_by_bbsc()
-        if bbsc:
-            ttk.Radiobutton(pools, text=_("Own server (Seamless co-op, a friend's)"), variable=pool,
-                            value='shadnet').pack(side='left')
-        elif pool.get() == 'shadnet':
+        if not bbsc and pool.get() == 'shadnet':
             pool.set('supermedo')
+        tabs.append(('supermedo', _('SuperMedo Server'),
+                     _("SuperMedo Server (recommended): supermedo.com's own servers, with a free account made below.")))
+        if BBSC_LAUNCH.exists():
+            tabs.append(('seamless', _('SuperMedo Seamless co-op (beta)'),
+                         _('SuperMedo Seamless co-op (beta): BBSC seamless co-op (up to 5 hunters through deaths, '
+                           'lamps and areas) on its own SuperMedo server, with the same account. Everyone in a '
+                           'session picks it.')))
+        if HUNTERS_DREAM_POOL:
+            tabs.append(('huntersdream', _("The Hunter's Dream (previous server)"),
+                         _("The Hunter's Dream: the previous server, still here for now; connections there often "
+                           'drop.')))
+        if bbsc:
+            tabs.append(('shadnet', _("Own server (Seamless co-op, a friend's)"),
+                         _("Own server: Seamless co-op's or a friend's private server, with its address and "
+                           'account.')))
+        tk, px = self.tk, self.px
+        # The ways to play online as cards side by side: what each one is, in a line or two, and the chosen one
+        # framed in gold (the tabs before showed only the names, and the difference was below them).
+        blurbs = {'supermedo': _('Online as on the PS4: messages, bloodstains, summons and invasions, and parties '
+                                 'to play with friends.'),
+                  'seamless': _('Up to 5 hunters stay together through deaths, lamps and areas (BBSC). It plays '
+                                'its own characters, and everyone in the session chooses it.')}
+        pools = tk.Frame(f, bg=PANEL)
+        pools.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=(px(4), 0))
+        cards = {}
+        for index, (value, title, hint) in enumerate(tabs):
+            pools.columnconfigure(index, weight=1, uniform='pools')
+            card = tk.Frame(pools, bg=theme.CARD, highlightthickness=px(2), cursor='hand2')
+            card.grid(row=0, column=index, sticky='nsew', padx=(0, px(10) if index < len(tabs) - 1 else 0))
+            top = tk.Frame(card, bg=theme.CARD)
+            top.pack(fill='x', padx=px(14), pady=(px(10), 0))
+            dot = tk.Label(top, text='', bg=theme.CARD, font=(theme.BODY_SEMI, 11))
+            dot.pack(side='left')
+            name = tk.Label(top, text=title, bg=theme.CARD, font=(theme.BODY_SEMI, 11), anchor='w')
+            name.pack(side='left', padx=(px(6), 0))
+            words = self.wrap_within(tk.Label(card, text=blurbs.get(value, hint), bg=theme.CARD, fg=theme.MUTED,
+                                              font=(theme.BODY, 9), justify='left', anchor='w'), 480)
+            words.pack(fill='x', padx=px(14), pady=(px(4), px(12)))
+            for widget in (card, top, dot, name, words):
+                widget.bind('<Button-1>', lambda _e, v=value: pool.set(v))
+            cards[value] = (card, dot, name)
+
+        def show_tabs(*_a):
+            for value, (card, dot, name) in cards.items():
+                on = pool.get() == value
+                card.configure(highlightbackground=theme.GOLD if on else theme.BORDER,
+                               highlightcolor=theme.GOLD if on else theme.BORDER)
+                dot.configure(text='●' if on else '○', fg=theme.GOLD if on else theme.MUTED)
+                name.configure(fg=theme.GOLD_LIGHT if on else theme.TEXT)
+        pool.trace_add('write', show_tabs)
+        show_tabs()
         pools.setting_key = 'online_pool'  # the search's words (bbport_search.WORDS)
-        self.row(f, _('Play with'), pools, ' '.join(
-            [_("SuperMedo Server (recommended): supermedo.com's own servers, with a free account made below.")] +
-            ([_("The Hunter's Dream: the previous server, still here for now; connections there often drop.")]
-             if HUNTERS_DREAM_POOL else []) +
-            ([_("Own server: Seamless co-op's or a friend's private server, with its address and account.")]
-             if bbsc else [])))
+        self.index_entry(pools, _('Play with'), ' '.join(hint for _v, _t, hint in tabs), 'online_pool')
         self.hunters_line = ttk.Label(f, text='', style='Muted.TLabel')
         self.hunters_line.grid(row=self.next_row(f), column=1, sticky='w', pady=(2, 0))
         # Each pool shows only its own settings (show_pool below).
@@ -3086,7 +3484,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         show_accounts()
         thd_token.trace_add('write', lambda *_a: show_accounts())  # also forgotten after a refusal
         self.row(f, _('Account'), account, key='thd_online_id')
-        signing = ttk.Label(f, text='', style='Muted.TLabel', justify='left', wraplength=self.px(560))
+        signing = self.wrap_within(ttk.Label(f, text='', style='Muted.TLabel', justify='left', anchor='w'), 560)
         # The code to type on the website, large, with a button that copies it.
         code_box = ttk.Frame(f)
         code_label = ttk.Label(code_box, text='', style='Code.TLabel')
@@ -3104,7 +3502,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             else:
                 code_box.grid_remove()
 
-        def sign_in():
+        def sign_in_thd():  # its own name: tests/test_launcher_findable.py finds this page's button by it
             signing.configure(text=_('Starting the sign-in…'))
             show_code()
 
@@ -3116,15 +3514,18 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             def work():
                 try:
                     name, token = thd_sign_in(on_code)
-                except (OSError, ValueError) as error:
+                except Exception as error:  # a broken reply too (BadStatusLine): the line always answers
                     self.ui_calls.put(lambda e=connection_error(error, COMMUNITY_SERVER): (
                         signing.configure(text=_('Sign-in failed: {}').format(e)), show_code()))
                     return
                 self.ui_calls.put(lambda: (thd_id.set(name), thd_token.set(token), signing.configure(text=''),
                                            show_code(), show_accounts(), self.collect()))
             threading.Thread(target=work, daemon=True).start()
-        self.row(f, '', ttk.Button(f, text=_('Sign in with Discord'), command=sign_in))
-        signing.grid(row=self.next_row(f), column=1, sticky='w', pady=(6, 0))
+        button = self.row(f, '', ttk.Button(f, text=_('Sign in with Discord'), command=sign_in_thd))
+        if HUNTERS_DREAM_POOL:  # hidden otherwise: the search must not lead to it
+            self.index_entry(button, _('Sign in with Discord'), _("The Hunter's Dream account"),
+                             key='button:signin_thd')
+        signing.grid(row=self.next_row(f), column=1, sticky='we', pady=(6, 0))
         code_box.grid(row=self.next_row(f), column=1, sticky='w', pady=(4, 0))
         self.check(f, 'bridge_live_map', 'app', _('Show me on the live map'),
                    _("thehuntersdream.com/map shows where players are and which bells ring: the game sends "
@@ -3145,26 +3546,43 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         # shadNet server, the only other one, turned the port away.
         custom = self.var('online_custom_servers', 'app')
         group('shadnet')
-        # SuperMedo Server: the account in use (Sign out empties it), and a new account made on the
-        # server from here with its own boxes; once made, it is the account in use. Its own settings,
-        # not the shadNet boxes (a co-op tool writes those).
+        # SuperMedo Server and Seamless co-op share one account. Signed in, the section is the name and Sign out;
+        # signed out, the three ways in: Discord, the Online ID with its password (an account made here or on
+        # another PC: the launcher had only Discord and sign-up), and a new account, folded until asked for.
+        # Its own settings, not the shadNet boxes (a co-op tool writes those).
         npid_var, password_var = self.var('supermedo_npid', 'app'), self.var('supermedo_pass', 'app')
         self.section(f, _('SuperMedo account'))
-        signed = ttk.Label(f, text='', justify='left')
+        self.note(f, _('One account for SuperMedo Server and Seamless co-op.'), top=0)
+        group('supermedo')
+        # Sign out stays beside the name, greyed out while nobody is signed in: hidden, the search ranked it
+        # behind other answers to "how do I sign out".
+        account = ttk.Frame(f)
+        signed = ttk.Label(account, text='', justify='left')
+        signed.pack(side='left')
+        buttons = ttk.Frame(f)
+
+        def signed_name():
+            return pool_account({'online_pool': 'supermedo', 'supermedo_npid': npid_var.get(),
+                                 'supermedo_pass': password_var.get()})
 
         def show_signed(*_args):
-            name = npid_var.get().strip()
-            signed.configure(text=_('Signed in as {}').format(name) if name and password_var.get()
-                             else _('Not signed in: sign in with Discord, or create an account below.'))
+            name = signed_name()
+            signed.configure(text=_('Signed in as {}').format(name) if name else _('Not signed in'))
+            sign_out_button.state(['!disabled'] if name else ['disabled'])
+            show_account()
         npid_var.trace_add('write', show_signed)
         password_var.trace_add('write', show_signed)
-        show_signed()
 
         def sign_out():
             npid_var.set('')
             password_var.set('')
             self.collect()
-        discord_line = ttk.Label(f, text='', style='Muted.TLabel', justify='left', wraplength=self.px(560))
+        sign_out_button = ttk.Button(account, text=_('Sign out'), command=sign_out)
+        sign_out_button.pack(side='left', padx=(px(14), 0))
+        self.row(f, _('Account'), account, key='supermedo_npid')
+        self.index_entry(sign_out_button, _('Sign out'), _('SuperMedo account'), key='button:signout')
+        group('supermedo')
+        discord_line = self.wrap_within(ttk.Label(f, text='', style='Muted.TLabel', justify='left', anchor='w'), 560)
 
         def sign_in_discord():
             discord_line.configure(text=_('Starting the sign-in…'))
@@ -3177,22 +3595,62 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             def work():
                 try:
                     npid, password = discord_sign_in(COMMUNITY_SERVER, on_page)
-                except (OSError, ValueError, KeyError) as error:
-                    self.ui_calls.put(lambda e=error: discord_line.configure(
+                except Exception as error:  # a broken reply too (BadStatusLine): the line always answers
+                    self.ui_calls.put(lambda e=connection_error(error, COMMUNITY_SERVER): discord_line.configure(
                         text=_('Sign-in failed: {}').format(e)))
                     return
                 self.ui_calls.put(lambda: (npid_var.set(npid), password_var.set(password),
                                            discord_line.configure(text=''), self.collect()))
             threading.Thread(target=work, daemon=True).start()
-        self.row(f, _('Account'), signed, key='supermedo_npid')
-        buttons = ttk.Frame(f)
-        ttk.Button(buttons, text=_('Sign in with Discord'), command=sign_in_discord).pack(side='left')
-        ttk.Button(buttons, text=_('Sign out'), command=sign_out).pack(side='left', padx=(14, 0))
-        self.row(f, '', buttons, _('Discord makes your SuperMedo account the first time, named after your '
-                                    'Discord name; nothing to remember. Sign in again on any PC.'))
-        discord_line.grid(row=self.next_row(f), column=1, sticky='w', pady=(6, 0))
-        self.section(f, _('New SuperMedo account'))
-        sign_up = ttk.Label(f, text='', style='Muted.TLabel', justify='left', wraplength=self.px(560))
+        button = ttk.Button(buttons, text=_('Sign in with Discord'), command=sign_in_discord)
+        button.pack(side='left')
+        hint = _('Discord makes your SuperMedo account the first time, named after your Discord name; nothing to '
+                 'remember. Sign in again on any PC.')
+        self.index_entry(button, _('Sign in with Discord'), hint, key='button:signin_supermedo')
+        self.row(f, 'Discord', buttons, hint, key='supermedo_npid')
+        discord_line.grid(row=self.next_row(f), column=1, sticky='we', pady=(6, 0))
+        # The Online ID and its password: checked with the server's own login before they are kept, so a typo
+        # never leaves the game to fail at the start (the game logs in with exactly these).
+        login_npid, login_password = self.tk.StringVar(value=''), self.tk.StringVar(value='')
+        login_line = self.wrap_within(ttk.Label(f, text='', style='Muted.TLabel', justify='left', anchor='w'), 560)
+
+        def sign_in_password():
+            npid, password = login_npid.get().strip(), login_password.get()  # read here, not in the thread
+            if not npid or not password:
+                login_line.configure(text=_('Enter your Online ID and your password.'))
+                return
+            login_line.configure(text=_('Checking the account…'))
+
+            def work():
+                problem = bbport_signin.password_problem(npid, password)  # the line always answers
+                if problem:
+                    self.ui_calls.put(lambda: login_line.configure(text=problem))
+                    return
+                self.ui_calls.put(lambda: (npid_var.set(npid), password_var.set(password), login_password.set(''),
+                                           login_line.configure(text=''), self.collect()))
+            threading.Thread(target=work, daemon=True).start()
+        self.row(f, _('Online ID'), ttk.Entry(f, textvariable=login_npid, width=40), key='supermedo_npid')
+        login_row = ttk.Frame(f)
+        password_box = ttk.Entry(login_row, textvariable=login_password, width=28, show='•')
+        password_box.pack(side='left')
+        password_box.bind('<Return>', lambda _e: sign_in_password())
+        login_button = ttk.Button(login_row, text=_('Sign in'), command=sign_in_password)
+        login_button.pack(side='left', padx=(px(8), 0))
+        self.row(f, _('Password'), login_row,
+                 _('An account made here, on another PC or before: its Online ID and password.'), key='supermedo_npid')
+        self.index_entry(login_button, _('Online ID and password'), _('Sign in'), key='button:signin_password')
+        login_line.grid(row=self.next_row(f), column=1, sticky='we', pady=(4, 0))
+        # A new account: a gold link opens its boxes (most players sign in with Discord).
+        register_link = self.tk.Label(f, text='', bg=PANEL, fg=GOLD, cursor='hand2', font=(theme.BODY_MEDIUM, 9))
+        register_link.grid(row=self.next_row(f), column=1, sticky='w', pady=(px(10), 0))
+        group('supermedo_out')
+        register_open = [False]
+
+        def toggle_register(_e=None, show=None):
+            register_open[0] = (not register_open[0]) if show is None else show
+            show_account()
+        register_link.bind('<Button-1>', toggle_register)
+        sign_up = self.wrap_within(ttk.Label(f, text='', style='Muted.TLabel', justify='left', anchor='w'), 560)
         new_npid, new_password, email = (self.tk.StringVar(value='') for _n in range(3))
 
         def create_account():
@@ -3205,10 +3663,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             sign_up.configure(text=_('Creating the account…'))
 
             def work():
-                try:
-                    problem = shadnet_register(SUPERMEDO_SERVER, npid, password, mail)
-                except OSError as error:
-                    problem = _('SuperMedo Server could not be reached: {}').format(error)
+                problem = bbport_signin.register_problem(npid, password, mail)  # never "Creating…" for good
                 if problem:
                     self.ui_calls.put(lambda: sign_up.configure(text=problem))
                     return
@@ -3222,9 +3677,31 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                  key='supermedo_npid')
         self.row(f, _('Email address'), ttk.Entry(f, textvariable=email, width=40),
                  _('Only to make the account.'), key='supermedo_npid')
-        self.row(f, '', ttk.Button(f, text=_('Create account'), command=create_account))
-        sign_up.grid(row=self.next_row(f), column=1, sticky='w', pady=(6, 0))
-        group('supermedo')
+        button = self.row(f, '', ttk.Button(f, text=_('Create account'), command=create_account))
+        self.index_entry(button, _('Create account'), _('New SuperMedo account'), key='button:create_account',
+                         reveal=lambda: toggle_register(show=True))
+        sign_up.grid(row=self.next_row(f), column=1, sticky='we', pady=(6, 0))
+        group('register')
+        built = []  # the page's last row is made
+
+        def show_account():
+            """Signed in: the name and Sign out. Signed out: the ways in, and the new account's boxes once
+            asked for. Only on the pools with the SuperMedo account (show_pool hides it on the others), and once
+            the page is built: rows hidden earlier are not counted by next_row, and the rows built after them
+            took the same numbers (the party's lay over the new account's boxes when they opened)."""
+            if pool.get() not in ('supermedo', 'seamless') or not built:
+                return
+            signed_in = bool(signed_name())
+            for name, wanted in (('supermedo_out', not signed_in), ('register', not signed_in and register_open[0])):
+                for widget in groups.get(name, []):
+                    widget.grid() if wanted else widget.grid_remove()
+            register_link.configure(text=_('No account yet? Make one') + ('  ⌄' if register_open[0] else '  ›'))
+        show_signed()
+        self.build_party(f, npid_var, password_var)
+        group('party')
+        if BBSC_LAUNCH.exists():
+            bbport_seamless.build(self, f)
+        group('seamless')
         self.section(f, _('Game server (messages, bloodstains, ghosts)'))
         community = self.var('online_community', 'app')
         self.row(f, _('Game server'), ttk.Entry(f, textvariable=community, width=40),
@@ -3250,6 +3727,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             pool_name = pool.get()
             own = custom.get()
             address, webapi = (SUPERMEDO_SERVER, SUPERMEDO_WEBAPI) if pool_name == 'supermedo' else \
+                (SEAMLESS_SERVER, SEAMLESS_WEBAPI) if pool_name == 'seamless' else \
                 shadnet_servers({**values, 'online_custom_servers': own})
             game = game_server({**values, 'online_pool': pool_name, 'online_custom_servers': own})
             supermedo_name = npid_var.get().strip() if password_var.get() else ''
@@ -3258,30 +3736,48 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             result.configure(text=_('Checking…'))
 
             def work():
-                if hunters_dream:
-                    text = server_check_hunters_dream()
-                    text += '\n' + (_('Signed in as {}').format(signed_in) if signed_in else
-                                    _('Not signed in: use "Sign in with Discord" above.'))
-                else:
-                    text = server_check(address, webapi, game)
-                if pool_name == 'supermedo':
-                    text += '\n' + (_('Signed in as {}').format(supermedo_name) if supermedo_name else
-                                    _('Not signed in: sign in with Discord, or create an account below.'))
-                if pool_name == 'shadnet' and own and values['online_webapi'].strip() \
-                        and values['online_webapi'].strip() != webapi:
-                    text += '\n' + _('The WebAPI box holds the game server address; it is ignored.')
-                if not online_on:
-                    text += '\n' + _('"Play online" is off: the game starts offline.')
+                try:
+                    if hunters_dream:
+                        text = server_check_hunters_dream()
+                        text += '\n' + (_('Signed in as {}').format(signed_in) if signed_in else
+                                        _('Not signed in: use "Sign in with Discord" above.'))
+                    else:
+                        text = server_check(address, webapi, game)
+                    if pool_name in ('supermedo', 'seamless'):
+                        text += '\n' + (_('Signed in as {}').format(supermedo_name) if supermedo_name else
+                                        _('Not signed in: sign in with Discord, or create an account below.'))
+                    if pool_name == 'shadnet' and own and values['online_webapi'].strip() \
+                            and values['online_webapi'].strip() != webapi:
+                        text += '\n' + _('The WebAPI box holds the game server address; it is ignored.')
+                    if not online_on:
+                        text += '\n' + _('"Play online" is off: the game starts offline.')
+                except Exception as error:  # the line never stays at "Checking…" (R85); only a bug gets here
+                    text = _('The check stopped: {}').format(error_text(error, kind=True))
                 self.ui_calls.put(lambda: result.configure(text=text))
             threading.Thread(target=work, daemon=True).start()
-        self.row(f, '', ttk.Button(f, text=_('Test connection'), command=check))
+        button = self.row(f, '', ttk.Button(f, text=_('Test connection'), command=check))
+        self.index_entry(button, _('Test connection'), _('Connection'), key='button:test_connection')
         result.grid(row=self.next_row(f), column=1, sticky='w', pady=(6, 0))
-        self.note(f, _('Everyone in a session needs the same game version (1.09) and the same server. '
-                       'Cheats change the game for the other players too: turn them off when you play together.'))
+        self.note(f, _('Everyone in a session needs the same game version (1.09) and the same server.') + ' ' +
+                  _('Cheats, debug features and third-party patches run offline only.'))
         show_code()  # hidden until a sign-in shows one; its row stays reserved (rows are counted above)
         shown = {'shadnet': {'account', 'shadnet', 'servers', 'upnp'},
                  'huntersdream': {'huntersdream', 'upnp'},
-                 'supermedo': {'supermedo', 'upnp'}}
+                 'supermedo': {'supermedo', 'supermedo_out', 'register', 'party', 'upnp'},
+                 'seamless': {'supermedo', 'supermedo_out', 'register', 'party', 'seamless', 'upnp'}}
+
+        def show_state(*_args):
+            title = next((title for value, title, _hint in tabs if value == pool.get()), '')
+            name = self.account_name()
+            if not self.var('online', 'app').get():
+                text, colour = _('• Online play is off: the game starts offline.'), theme.MUTED
+            elif name:
+                text, colour = _('✓ Online with {0}, signed in as {1}.').format(title, name), theme.GOLD_LIGHT
+            else:
+                text, colour = _("⚠ Not signed in yet: sign in below to play online."), theme.AMBER
+            state_line.configure(text=text, foreground=colour)
+        for var in (self.var('online', 'app'), npid_var, password_var, thd_token):
+            var.trace_add('write', show_state)
 
         def show_pool(*_args):
             if pool.get() == 'huntersdream' and not HUNTERS_DREAM_POOL:
@@ -3300,9 +3796,160 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                 show_code(code_label.cget('text'))
             else:
                 code_box.grid_remove()
+            show_account()  # of the SuperMedo account's rows, only those for signed in or out
+            show_state()
         pool.trace_add('write', show_pool)
         custom.trace_add('write', show_pool)
+        built.append(True)
         show_pool()
+        # The other pools' rows stay findable ("sign in" while The Hunter's Dream is chosen): the search says
+        # which pool they need and marks "Play with". An own server's only while it can be chosen.
+        only = {'supermedo': _('only with SuperMedo Server'),
+                'huntersdream': _("only with The Hunter's Dream") if HUNTERS_DREAM_POOL else None,
+                'shadnet': _('only with an own server') if bbsc else None,
+                'seamless': _('only with SuperMedo Seamless co-op')}
+        for name, widgets in groups.items():
+            choices = [p for p, wanted in shown.items() if name in wanted]  # (pools is the "Play with" frame)
+            if len(choices) == 1 and only[choices[0]]:
+                self.index_only(widgets, only[choices[0]], 'online_pool')
+
+    def build_party(self, f, npid_var, password_var):
+        """Party (play with friends): a party code from SuperMedo Server (parties.go there). While in a party,
+        the hunter's signs and bells find only the party's hunters (the server gives them the party's summon
+        password), on SuperMedo Server and in Seamless co-op: a password of their own in the game's network
+        settings kept them apart. Seamless co-op had no party until 2026-11-02 (Nick: the party brings its
+        hunters together there too)."""
+        ttk = self.ttk
+        key = self.var('party_key', 'app')
+        self.section(f, _('Party (play with friends)'))
+        line = ttk.Label(f, text=_('Not in a party.'), justify='left', wraplength=self.px(560))
+        self.row(f, _('Your party'), line,
+                 _("While you are in a party, your bells and summon signs find only your party's hunters, with no "
+                   "level limit. Leave the password in the game's network settings empty: the party brings you "
+                   'together.'), key='party_key')
+        code_row = ttk.Frame(f)
+        code = ttk.Label(code_row, text='', style='Code.TLabel')
+        code.pack(side='left')
+
+        def copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code.cget('text'))
+        ttk.Button(code_row, text=_('Copy'), command=copy).pack(side='left', padx=(14, 0))
+        ttk.Button(code_row, text=_('New code'), command=lambda: act('new_code')).pack(side='left', padx=(8, 0))
+        self.row(f, _('Party code'), code_row,
+                 _('Send this code to your friends. A new code stops the old one; friends already in stay.'),
+                 key='party_key')
+        first_row = int(code_row.grid_info()['row'])
+        members = ttk.Frame(f)
+        self.row(f, '', members)
+        join_row = ttk.Frame(f)
+        typed = self.tk.StringVar(value='')
+        ttk.Entry(join_row, textvariable=typed, width=16).pack(side='left')
+        ttk.Button(join_row, text=_('Join'), command=lambda: act('join', {'code': typed.get().strip()})).pack(
+            side='left', padx=(8, 0))
+        self.row(f, _('Join a party'), join_row, _('Paste the code a friend sent you (SM-XXXX-XXXX).'), key='party_key')
+        # Right of the code and the join field: the party's hunters with their levels.
+        roster = self.tk.Frame(f, bg=theme.SURFACE, highlightthickness=1, highlightbackground=theme.BORDER_STRONG)
+        roster.grid(row=first_row, column=2, rowspan=int(join_row.grid_info()['row']) - first_row + 2, sticky='nw',
+                    padx=(self.px(24), 0), pady=(self.px(6), 0))
+        roster.grid_remove()
+        buttons = ttk.Frame(f)
+        ttk.Button(buttons, text=_('Make party code'), command=lambda: act('host')).pack(side='left')
+        leave = ttk.Button(buttons, text=_('Leave party'), command=lambda: act('leave'))
+        leave.pack(side='left', padx=(8, 0))
+        ttk.Button(buttons, text=_('Refresh'), command=lambda: act('status')).pack(side='left', padx=(8, 0))
+        self.row(f, '', buttons)
+        said = ttk.Label(f, text='', style='Muted.TLabel', justify='left', wraplength=self.px(560))
+        said.grid(row=self.next_row(f), column=1, sticky='w', pady=(4, 0))
+
+        def show_roster(party):
+            for child in roster.winfo_children():
+                child.destroy()
+            tk, hunters = self.tk, party.get('members', [])
+            tk.Label(roster, text=_('IN THE PARTY  {}/{}').format(len(hunters), party.get('size', 4)), bg=theme.SURFACE,
+                     fg=theme.GOLD, font=(theme.HEAD, 8)).grid(row=0, column=0, columnspan=3, sticky='w',
+                                                               padx=self.px(12), pady=(self.px(8), self.px(4)))
+            for i, m in enumerate(hunters, start=1):
+                last = i == len(hunters)
+                pady = (0, self.px(10) if last else self.px(2))
+                tk.Label(roster, text='●', bg=theme.SURFACE, fg=theme.GOLD_LIGHT if m.get('online') else theme.BORDER_HOVER,
+                         font=(theme.BODY, 9)).grid(row=i, column=0, sticky='w', padx=(self.px(12), self.px(6)), pady=pady)
+                name = m['name'] + ('  ★' if m.get('host') else '')
+                tk.Label(roster, text=name, bg=theme.SURFACE, fg=theme.TEXT_STRONG if m.get('online') else theme.TEXT_SOFT,
+                         font=(theme.BODY_SEMI, 10)).grid(row=i, column=1, sticky='w', pady=pady)
+                tk.Label(roster, text=_('Level {}').format(m['level']) if m.get('level') else '–', bg=theme.SURFACE,
+                         fg=theme.MUTED, font=(theme.BODY, 9)).grid(row=i, column=2, sticky='e',
+                                                                   padx=(self.px(18), self.px(12)), pady=pady)
+            roster.grid()
+
+        def show(answer):
+            party = answer.get('party')
+            for child in members.winfo_children():
+                child.destroy()
+            if not party:
+                line.configure(text=_('Not in a party.'))
+                code_row.grid_remove()
+                roster.grid_remove()
+                leave.state(['disabled'])
+                return
+            line.configure(text=party_line(party))
+            show_roster(party)
+            leave.state(['!disabled'])
+            if party.get('code'):  # the host's: copy it, and kick a hunter
+                code.configure(text=party['code'])
+                code_row.grid()
+                for m in party.get('members', []):
+                    if not m.get('host'):
+                        ttk.Button(members, text=_('Kick') + ' ' + m['name'],
+                                   command=lambda n=m['name']: act('kick', {'member': n})).pack(side='left', padx=(0, 8))
+            else:
+                code_row.grid_remove()
+
+        def act(call, body=None, quiet=False):
+            name, password = npid_var.get().strip(), password_var.get()
+            if not name or not password:
+                if not quiet:
+                    said.configure(text=_('Sign in to your SuperMedo account first (above).'))
+                return
+            if not quiet:
+                said.configure(text=_('Checking…'))
+            stored = key.get()
+
+            def work():
+                try:
+                    status, answer = party_call(call, body, stored) if stored else (401, {})
+                    if status == 401:  # no key yet, or an old one: sign in with the account once
+                        status, signed = party_call('signin', {'name': name, 'password': password})
+                        if status != 200:
+                            raise ValueError(signed.get('error', status))
+                        # Kept only while the account is still the one asked for (a late answer after a switch
+                        # gave the new account the old one's key).
+                        self.ui_calls.put(lambda k=signed['key']: (key.set(k), self.collect())
+                                          if npid_var.get().strip() == name else None)
+                        status, answer = party_call(call, body, signed['key'])
+                    if status != 200:
+                        raise ValueError(answer.get('error', status))
+                    if not isinstance(answer, dict):
+                        raise ValueError(_('an answer that is not a party'))
+                except Exception as error:  # every failure answers (a broken reply too): "Checking…" stayed for good
+                    if not quiet:
+                        self.ui_calls.put(lambda e=error: said.configure(text=_('SuperMedo Server said: {}').format(e)))
+                    return
+                self.ui_calls.put(lambda: (show(answer), quiet or said.configure(text=''))
+                                  if npid_var.get().strip() == name else None)
+            threading.Thread(target=work, daemon=True).start()
+
+        def poll():  # while the party box is on screen: friends who join or leave show up by themselves
+            if roster.winfo_ismapped() and key.get():
+                act('status', quiet=True)
+            self.root.after(15000, poll)
+
+        code_row.grid_remove()
+        leave.state(['disabled'])
+        npid_var.trace_add('write', lambda *_a: key.set(''))  # another account: its own key
+        if npid_var.get().strip() and password_var.get() and key.get():
+            self.root.after(500, lambda: act('status'))
+        self.root.after(15000, poll)
 
     def build_mods(self):
         f = self.scrolled_page('mods', _('Mods & patches', 'Моды и патчи'),
@@ -3321,6 +3968,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                     _('shadPS4/GoldHEN XML patch files for version 1.09. Empty: {}',
                       'XML-патчи shadPS4/GoldHEN для версии 1.09. Пусто: {}').format(DATA_DIR / 'patches'),
                     on_change=self.refresh_lists)
+        self.note(f, _('Offline only: when you play online, the game starts without them, fair to the other '
+                       'players.'), top=6)
         self.patches_frame = self.ttk.Frame(f)
         self.patches_frame.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=(8, 0))
         self.ttk.Button(f, text=_('Refresh', 'Обновить'), command=self.refresh_lists).grid(
@@ -3332,6 +3981,17 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                                  'Трофеи, которые игра открывает во время игры; обновляются сразу, хранятся с '
                                  'сохранениями.'))
         self.trophy_filter, self.trophy_state = 'all', None
+        # A new PC or Windows: the trophies of the old installation (a player merged two trophies.log by hand).
+        holder = self.ttk.Frame(f)
+        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=(4, 8))
+        button = self.ttk.Button(holder, text=_('Bring achievements from another installation'),
+                                 command=self.import_trophies)
+        button.pack(side='left')
+        hint = _('From an older port folder, the drive of your old PC or shadPS4: added to yours, none removed.')
+        self.trophy_import_note = self.ttk.Label(holder, text=hint, style='Muted.TLabel', justify='left', anchor='w')
+        self.wrap_within(self.trophy_import_note, 460).pack(side='left', fill='x', expand=True, padx=10)
+        self.trophy_import_note.hint = hint
+        self.index_entry(button, _('Bring achievements from another installation'), hint, key='button:trophies')
         self.trophy_body = self.ttk.Frame(f)
         self.trophy_body.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we')
 
@@ -3473,8 +4133,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         middle.pack(side='left', fill='x', expand=True, pady=10)
         tk.Label(middle, text=_(name), bg=CARD, fg=TEXT if earned else MUTED,
                  font=(theme.BODY, 11, 'bold' if earned else 'normal')).pack(anchor='w')
-        tk.Label(middle, text=_(text), bg=CARD, fg=MUTED, font=(theme.BODY, 9), justify='left',
-                 wraplength=self.px(520)).pack(anchor='w', pady=(1, 0))
+        self.wrap_within(tk.Label(middle, text=_(text), bg=CARD, fg=MUTED, font=(theme.BODY, 9), justify='left',
+                                  anchor='w'), 520).pack(fill='x', pady=(1, 0))
 
     def set_trophy_filter(self, name):
         self.trophy_filter = name
@@ -3482,6 +4142,79 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
     def trophy_dir(self):
         return Path(self.var('user_dir', 'app').get() or DATA_DIR / 'user')
+
+    def import_trophies(self, folder=None):
+        """Achievements: the trophies of other installations (another port folder, shadPS4 and its forks, those of
+        the Windows before, or under a folder the player picks) added to this port's, after a copy of its
+        trophies.log (bbport_trophies.add_unlocks). The search walks folders: in a helper thread."""
+        if getattr(self, 'trophy_searching', False) or self.saves_folder_gone():
+            return
+        self.trophy_searching = True
+        self.trophy_import_note.configure(text=_('Looking for achievements on this PC…'))
+        target, game = self.trophy_dir() / trophies.LOG_NAME, self.var('game_dir', 'app').get()
+
+        def work():
+            try:
+                records = (saves.trophy_records_in(folder, [target]) if folder else
+                           saves.trophy_records(PORT_DIR, game, [target]))
+                found = [(where, path, trophies.missing(trophies.read_unlocks(path), target))
+                         for where, path in records]
+            except Exception:  # a search must never take the launcher down
+                found = []
+            self.ui_calls.put(lambda: self.offer_trophies(found, target, folder))
+        threading.Thread(target=work, daemon=True).start()
+
+    def saves_folder_gone(self):
+        """A saves folder of the player's own that is not there (missing_saves_folder): said, and True. The
+        achievements are never added to one made anew in its place."""
+        problem = missing_saves_folder({'user_dir': self.var('user_dir', 'app').get()})
+        if problem:
+            self.messagebox.showerror('Bloodborne', problem)
+        return bool(problem)
+
+    def offer_trophies(self, found, target, folder=None):
+        """The search's result: the installations with trophies that are not here yet, added on Yes; else a
+        folder to look in."""
+        self.trophy_searching = False
+        self.trophy_import_note.configure(text=self.trophy_import_note.hint)
+        have = trophies.read_log(target)
+        found = [(where, path, unlocks) for where, path, unlocks in found if set(unlocks) - set(have)]
+        if not found:
+            text = (_('No achievements in {} that are not here yet.').format(folder) if folder else
+                    _('No other installation on this PC has achievements that are not here yet.'))
+            if self.messagebox.askyesno('Bloodborne', text + '\n\n' + _(
+                    'Choose a folder to look in? An old port folder, a shadPS4 folder or the drive of your old PC.')):
+                chosen = self.filedialog.askdirectory(title=_('Choose the folder with the achievements'),
+                                                      initialdir=str(Path.home()))
+                if chosen:
+                    self.import_trophies(Path(chosen))
+            return
+        lines = '\n'.join('• ' + _('{}: {} new here').format(where, len(set(unlocks) - set(have))) + f'\n   {path}'
+                          for where, path, unlocks in found)
+        if not self.messagebox.askyesno('Bloodborne', _(
+                'Achievements found:\n\n{}\n\nAdd them to yours? Your trophies.log is copied first, and no trophy is '
+                'removed.').format(lines)):
+            return
+        union = {}
+        for _where, _path, unlocks in found:
+            for trophy, when in unlocks.items():
+                union[trophy] = min(when, union.get(trophy, when))
+        if self.saves_folder_gone():  # its drive went away during the search
+            return
+        try:
+            if not self.var('user_dir', 'app').get():  # only this port's own user/ before a first start, as run.py
+                target.parent.mkdir(parents=True, exist_ok=True)
+            added, copy = trophies.add_unlocks(union, target)
+        except OSError as error:
+            self.messagebox.showerror('Bloodborne', _('Could not add the achievements: {}').format(error))
+            return
+        if Path(self.tracker.user_dir) == target.parent:
+            # earned before, not just now: shown on the page without the "You've earned a trophy" notice
+            self.trophies_changed(self.tracker.refresh_log() + self.tracker.award_platinum(), announce=False)
+        done = _('Achievements added: {} new.').format(added)
+        if copy:
+            done += '\n\n' + _('Your previous list is kept as {}.').format(copy)
+        self.messagebox.showinfo('Bloodborne', done)
 
     def poll_trophies(self):
         """Every 2 s: trophies.log (written by the game) and last_run.log (a game started elsewhere)."""
@@ -3688,8 +4421,9 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         # self.ini/self.app -- self.var()'s ini/app bookkeeping does not apply to it.
         enabled_var = self.mouse_vars['enabled'] = tk.BooleanVar(value=ms['enabled'])
         enabled_var.trace_add('write', lambda *_a: (ms.__setitem__('enabled', enabled_var.get()), mark_mouse_edited()))
-        ttk.Checkbutton(f, text=_('Enable mouse look', 'Включить обзор мышью'), variable=enabled_var).grid(
-            row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(4, 0))
+        box = ttk.Checkbutton(f, text=_('Enable mouse look', 'Включить обзор мышью'), variable=enabled_var)
+        box.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(4, 0))
+        self.index_entry(box, _('Enable mouse look', 'Включить обзор мышью'), key='mouse:enabled')
         self.note(f, _('F7 also toggles this in-game, instantly; F8 reloads these settings '
                        'without restarting.', 'F7 также переключает это прямо в игре мгновенно; '
                        'F8 применяет эти настройки без перезапуска.'), top=2)
@@ -3771,8 +4505,9 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         def invert_check(key, text):
             var = self.mouse_vars[key] = tk.BooleanVar(value=ms[key])
             var.trace_add('write', lambda *_a: (ms.__setitem__(key, var.get()), mark_mouse_edited()))
-            ttk.Checkbutton(f, text=text, variable=var).grid(
-                row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(4, 0))
+            box = ttk.Checkbutton(f, text=text, variable=var)
+            box.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(4, 0))
+            self.index_entry(box, text, key=f'mouse:{key}')
 
         invert_check('invert_x', _('Invert horizontal', 'Инвертировать по горизонтали'))
         invert_check('invert_y', _('Invert vertical', 'Инвертировать по вертикали'))
@@ -3821,10 +4556,13 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                 warn.grid(row=r, column=2, sticky='w', padx=(8, 0))
                 self.controller_rows[output] = (btn, warn)
         reset = ttk.Frame(f)
-        ttk.Button(reset, text=_('Reset controller buttons', 'Сбросить кнопки геймпада'),
-                   command=lambda: [self.set_controller(o, DEFAULT_CONTROLLER.get(o)) for o in CONTROLLER_OUTPUTS]
-                   ).pack(side='left')
+        button = ttk.Button(reset, text=_('Reset controller buttons', 'Сбросить кнопки геймпада'),
+                            command=lambda: [self.set_controller(o, DEFAULT_CONTROLLER.get(o))
+                                             for o in CONTROLLER_OUTPUTS])
+        button.pack(side='left')
         self.row(f, '', reset)
+        self.index_entry(button, _('Reset controller buttons', 'Сбросить кнопки геймпада'),
+                         key='button:reset_controller')
         self.refresh_controller_rows()
 
     def current_controller(self, output):
@@ -3909,7 +4647,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         cannot be written (said in a message)."""
         lines = apply_layout(self.remap_lines)
         try:
-            Path(self.remap_ini_path).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+            textfile.write(self.remap_ini_path, '\n'.join(lines) + '\n')
         except OSError as error:
             self.messagebox.showerror(_('Layout', 'Раскладка'), str(error))
             return False
@@ -4162,27 +4900,22 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             side='left', padx=6)
         ttk.Button(holder, text='bbport.ini', command=lambda: self.open_path(ini_path())).pack(side='left')
         ttk.Button(holder, text=_('Repeat the setup'), command=self.open_setup).pack(side='left', padx=6)
+        # The updates and the shader cache: here since the original launcher, and on Help for the simple view (the
+        # search finds them there, a page of both views), the shader cache also in Help's black screen topic.
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10, 0))
-        self.updates_button = ttk.Button(
-            holder, text=_('Check for updates', 'Проверить обновления'),
-            command=lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start())
-        self.updates_button.pack(side='left')
-        self.index_entry(self.updates_button, _('Check for updates', 'Проверить обновления'), key='button:updates')
-        button = ttk.Button(holder, text=_('Other versions…', 'Другие версии…'), command=self.choose_version)
-        button.pack(side='left', padx=(6, 0))
-        self.index_entry(button, _('Other versions…', 'Другие версии…'), key='button:versions')
+        ttk.Button(holder, text=_('Check for updates', 'Проверить обновления'), command=self.check_update_now).pack(
+            side='left')
+        ttk.Button(holder, text=_('Other versions…', 'Другие версии…'), command=self.choose_version).pack(
+            side='left', padx=(6, 0))
         ttk.Label(holder, text=f'v{VERSION_TEXT}', style='Muted.TLabel').pack(side='left', padx=10)
-        # The shader cache: here since the original launcher, and in Help's black screen topic.
         holder = ttk.Frame(f)
-        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10, 0))
-        button = ttk.Button(holder, text=_('Clear the shader cache'), command=self.clear_cache)
-        button.pack(side='left')
+        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=(10, 0))
+        ttk.Button(holder, text=_('Clear the shader cache'), command=self.clear_cache).pack(side='left')
         hint = _('For a black screen, or a broken picture after a driver update. The next start stutters for a few '
                  'minutes.')
-        ttk.Label(holder, text=hint, style='Muted.TLabel', wraplength=self.px(560), justify='left').pack(
-            side='left', padx=10)
-        self.index_entry(button, _('Clear the shader cache'), hint, key='button:shader_cache')
+        self.wrap_within(ttk.Label(holder, text=hint, style='Muted.TLabel', justify='left', anchor='w'), 560).pack(
+            side='left', fill='x', expand=True, padx=10)
         self.section(f, _('Appearance'))  # the translucent window: Launcher customization > Launcher
         self.check(f, 'windows_title_bar', 'app', _("Windows' title bar instead of the launcher's own"),
                    _('Applies when the launcher opens again.', 'Применится при следующем открытии лаунчера.'))
@@ -4219,10 +4952,11 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         # The Cathedral Ward benchmark for testers: with the game tests off (GAME_TESTS) it runs by
         # itself with the player's settings and gives one zip to send.
         holder = ttk.Frame(f)
-        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10, 0))
+        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=(10, 0))
         ttk.Button(holder, text=_('Benchmark for bug reports…'), command=self.open_bug_benchmark).pack(side='left')
-        ttk.Label(holder, text=_('A fixed route in Cathedral Ward for testers: one zip to send.'),
-                  style='Muted.TLabel').pack(side='left', padx=10)
+        self.wrap_within(ttk.Label(holder, text=_('A fixed route in Cathedral Ward for testers: one zip to send.'),
+                                   style='Muted.TLabel', justify='left', anchor='w'), 560).pack(
+            side='left', fill='x', expand=True, padx=10)
         self.index_entry(holder, _('Benchmark for bug reports…'),
                          _('A fixed route in Cathedral Ward for testers: one zip to send.'), 'button:benchmark')
 
@@ -4240,6 +4974,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         in fullscreen; at the end its report as a zip, shown in Explorer."""
         import bbport_benchmark as bench
         title = _('Benchmark for bug reports…').rstrip('…')
+        if self.update_installing():
+            return
         if self.process or bench.game_pids():
             self.messagebox.showinfo(title, _('Close the game first.'))
             return
@@ -4265,7 +5001,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                 'Windows': platform.version(), 'Game': ' '.join(game_info(self.var('game_dir', 'app').get()) or ())}
         folder = self.tests_dir() / (clock.strftime('%Y-%m-%d_%H%M%S') + '_benchmark')
         settings = {**self.app, 'online': False, 'fullscreen': True}
-        self.bench = bench.Test(PORT_DIR, run_command(), game_environment(settings), self.save_user_dir(),
+        self.bench = bench.Test(PORT_DIR, run_command(), game_environment(settings), self.normal_user_dir(),
                                 self.var('game_dir', 'app').get(),
                                 ini_path().read_text(encoding='utf-8') if ini_path().is_file() else '',
                                 scenario, bench.Variants({}, [('benchmark', {})]), folder,
@@ -4319,12 +5055,12 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
     def version_warning(self, parent):
         """A banner shown while the selected game is not version 1.09 (refresh_status)."""
-        label = self.ttk.Label(parent, style='Warning.TLabel', wraplength=self.px(640), justify='left', text=_(
+        label = self.ttk.Label(parent, style='Warning.TLabel', justify='left', anchor='w', text=_(
             'Your game is version {}: these options are patches for 1.09 and are not applied; the game runs '
             'at 30 FPS. Update the game to 1.09 to use them.',
             'Ваша игра версии {}: эти параметры — патчи для 1.09 и не применяются; игра работает в 30 FPS. '
             'Обновите игру до 1.09, чтобы их использовать.'))
-        label.grid(row=self.next_row(parent), column=0, columnspan=2, sticky='we', pady=(6, 4))
+        self.wrap_within(label, 640).grid(row=self.next_row(parent), column=0, columnspan=2, sticky='we', pady=(6, 4))
         label.template = label.cget('text')
         self.warnings = getattr(self, 'warnings', []) + [label]
 
@@ -4382,9 +5118,19 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                         (lambda: self.show('game')) if not info else
                         (lambda: self.open_topic('version')) if info[1] != PATCH_VERSION else None)
         self.check_line('saves', save, lambda: self.show('saves'))
-        # The start check (scripts/vulkan_check.py): only when the port cannot start on the card; Help says why.
-        self.check_line('gpu', _('✗ The graphics card cannot run the port: see Help') if self.gpu_problem() else '',
-                        lambda: self.show('help'))
+        # The start check (scripts/vulkan_check.py): only when the port cannot start on the card, or when the game
+        # runs on a slower one than the PC has (Vulkan does not see it, or its driver holds it back); Help says why.
+        unused = self.unused_card()
+        self.check_line('gpu', _('✗ The graphics card cannot run the port: see Help') if self.gpu_problem() else
+                        self.gpu_unused_line(),
+                        (lambda: self.open_topic('gpu_unseen')) if unused else lambda: self.show('help'))
+        # The game folder in OneDrive or another synced folder (Help's check counts the files kept online only).
+        self.check_line('files', '⚠ ' + _('The game folder is in OneDrive or another synced folder: move it (Help)')
+                        if info and bbport_help.synced_game(self.var('game_dir', 'app').get()) else '',
+                        lambda: self.open_topic('game_location'))
+        # AMD's DirectX 12 FSR 4 and frame generation could not be loaded, and the Visual C++ runtime is missing.
+        self.check_line('runtime', '• ' + _('AMD FSR 4 needs the Microsoft Visual C++ Redistributable: click to '
+                                            'download it') if self.runtime_problem() else '', self.open_vc_redist)
         self.check_line('fsr4', _('• FSR 4 files missing: FSR 3.1 is used meanwhile. Click to download (30 MB)')
                         if missing and self.var('upscaler', 'ini').get() == 'fsr4' else '', self.download_fsr4)
         fsr411_ready, status = True, None
@@ -4398,6 +5144,10 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         signed_in = bool(name)
         self.check_line('online', ('⚠ ' + _('Online is on, but you are not signed in yet: sign in now')
                                    if online and not signed_in else ''), lambda: self.show('online'))
+        # Cancel at Windows' "allow this app" question: the firewall blocks the game's incoming connections.
+        self.check_line('firewall', '⚠ ' + _('Windows Firewall blocks the game: co-op can fail (Help)')
+                        if online and getattr(self, 'firewall_blocked', False) else '',
+                        lambda: self.open_topic('firewall'))
         previous = online and self.var('online_pool', 'app').get() == 'huntersdream'  # nudged to SuperMedo Server
         self.check_line('pool', '• ' + _("The Hunter's Dream is the previous server, and connections there often "
                                          'drop: switch to SuperMedo Server') if previous else '',
@@ -4407,9 +5157,10 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                                              _('not signed in ›') if online and not signed_in else ''),
                                        fg=MUTED if signed_in else theme.AMBER)
         self.show_hunters()
-        cheats = [_(*title) for key, title, _on in CHEATS if self.var(key, 'ini').get()]
-        self.check_line('cheats', ('⚠ ' + _('Cheats on: {}').format(', '.join(t.split(' (')[0] for t in cheats))
-                                   if cheats else ''), lambda: self.show('cheats'))
+        cheats = ', '.join(_(*title).split(' (')[0] for key, title, _on in CHEATS if self.var(key, 'ini').get())
+        self.check_line('cheats', ('• ' + _('Cheats on: {} (they stay off online)').format(cheats) if online else
+                                   '⚠ ' + _('Cheats on: {}').format(cheats)) if cheats else '',
+                        lambda: self.show('cheats'))
         news = self.var('setup_done', 'app').get() and self.app.get('seen_version') != VERSION_TEXT
         self.check_line('news', '• ' + _('New in version {}: what has changed').format(VERSION_TEXT) if news else '',
                         self.open_news)
@@ -4467,12 +5218,15 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.hunters_asking = True
 
         def ask():
-            found = hunters_online()
+            found = None
 
             def done():
                 self.hunters, self.hunters_when, self.hunters_asking = found, time.time(), False
                 self.show_hunters()
-            self.ui_calls.put(done)
+            try:
+                found = hunters_online()
+            finally:  # hunters_asking back to False whatever happened: a thread that died left it True for good
+                self.ui_calls.put(done)
         threading.Thread(target=ask, daemon=True).start()
 
     def show_hunters(self):
@@ -4521,6 +5275,31 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         return f'{_(*fps)}   ·   {upscaler}   ·   {output}   ·   {online}'
 
     def detect_gpu(self):
+        """Helper thread: the graphics card, its support checks and the processor (detect_hardware), for the Play
+        page and the rating. However it ends, the window hears that it is over: an error nobody expected ended the
+        thread with "Checking the graphics card…" and the support checks waiting for good. Then the error is on the
+        Log page, and the checks that had not answered say "check failed"."""
+        try:
+            self.detect_hardware()
+        except Exception as error:
+            failed, why = fsr41_check_failed(error), error_text(error, kind=True)
+
+            def not_checked():
+                self.append(_('The check of the graphics card stopped: {}').format(why) + '\n')
+                if self.fsr411_support is None:  # its answer, when it came, ran before this
+                    self.fsr411_support = failed
+                    self.refresh_fsr411()
+                    self.refresh_status()
+            self.ui_calls.put(not_checked)
+            if self.fg401_support is None:
+                self.fg401_support = fg401_check_failed()
+        finally:
+            self.ui_calls.put(self.refresh_status)
+            self.ui_calls.put(self.hardware_ready)
+            self.ui_calls.put(self.refresh_motion)
+            self.ui_calls.put(self.refresh_fg401)
+
+    def detect_hardware(self):
         exe = PORT_DIR / 'bin' / 'bb-gpu-capabilities.exe'
         if not exe.is_file():
             exe = PORT_DIR / 'out' / 'bb-gpu-capabilities.exe'
@@ -4543,7 +5322,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             elif result.returncode:
                 text = _('✗ No Vulkan 1.3 graphics card found (update the driver)',
                          '✗ Не найдена видеокарта с Vulkan 1.3 (обновите драйвер)')
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired):  # ValueError: output in another code page
             pass
         self.gpu_text = text
         self.vulkan = vulkan_verdict(env)
@@ -4554,16 +5333,13 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             self.refresh_status()
         self.ui_calls.put(fsr411_done)
         self.fg401_support = bbport_fg401.query_versions(PORT_DIR, env)
+        self.firewall_blocked = bbport_help.firewall_blocks(PORT_DIR / 'bin' / 'bb-probe.exe')
         self.gpu_line = hardware.best_gpu_line(names)  # 'Name, discrete, 16304 MiB' for the hardware check
         try:
             self.cpu, self.ram = hardware.detect_cpu(), hardware.memory_gb()
         except Exception:  # the rating is a guide: never stop the launcher over it
             self.cpu, self.ram = hardware.Cpu('', None), 16
         self.cpu_instructions = hardware.instructions()  # the System page's hard limits
-        self.ui_calls.put(self.refresh_status)
-        self.ui_calls.put(self.hardware_ready)
-        self.ui_calls.put(self.refresh_motion)
-        self.ui_calls.put(self.refresh_fg401)
 
     def refresh_fsr4(self):
         total, missing = len(fsr4_files()), len(fsr4_missing())
@@ -4596,8 +5372,13 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         self.fsr411_support = None
         self.refresh_fsr411()
         def work():
-            support = bbport_fsr41.query(PORT_DIR,
-                bbport_fsr411.environment(PORT_DIR, self.app), refresh=True)
+            try:
+                support = bbport_fsr41.query(PORT_DIR,
+                    bbport_fsr411.environment(PORT_DIR, self.app), refresh=True)
+            except Exception as error:  # never "checking support…" for good
+                support = fsr41_check_failed(error)
+                self.ui_calls.put(lambda e=error_text(error, kind=True): self.append(
+                    _('The check of the graphics card stopped: {}').format(e) + '\n'))
             def done():
                 self.fsr411_support = support
                 self.refresh_fsr411()
@@ -4642,12 +5423,6 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
         def work():
             error = None
-            try:
-                fetch_fsr4vk.fetch(folder, progress)
-                if not fetch_fsr4vk.files_ok(folder):
-                    raise fetch_fsr4vk.FetchError(_('Vulkan (fsr4vk): files missing or need updating.'))
-            except (OSError, fetch_fsr4vk.FetchError) as failure:
-                error = str(failure)
 
             def done():
                 self.fsr411_downloading = False
@@ -4657,7 +5432,14 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                 self.refresh_status()
                 if error:
                     self.messagebox.showerror('FSR 4.1.1', _('Download failed: {}', 'Не удалось скачать: {}').format(error))
-            self.ui_calls.put(done)
+            try:
+                fetch_fsr4vk.fetch(folder, progress)
+                if not fetch_fsr4vk.files_ok(folder):
+                    raise fetch_fsr4vk.FetchError(_('Vulkan (fsr4vk): files missing or need updating.'))
+            except Exception as failure:  # a broken download too (IncompleteRead)
+                error = error_text(failure)
+            finally:  # Play and the button come back whatever happened (R85)
+                self.ui_calls.put(done)
         threading.Thread(target=work, daemon=True).start()
 
     def download_fsr4(self):
@@ -4667,6 +5449,13 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
         def work():
             error = None
+
+            def done():
+                self.downloading = False
+                self.refresh_fsr4()
+                self.refresh_status()
+                if error:
+                    self.messagebox.showerror('FSR 4', _('Download failed: {}', 'Не удалось скачать: {}').format(error))
             try:
                 folder.mkdir(parents=True, exist_ok=True)
                 for name in fsr4_missing():
@@ -4675,16 +5464,10 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                         part.write_bytes(response.read())
                     part.replace(folder / name)
                     self.ui_calls.put(self.refresh_fsr4)
-            except OSError as failure:
-                error = failure
-
-            def done():
-                self.downloading = False
-                self.refresh_fsr4()
-                self.refresh_status()
-                if error:
-                    self.messagebox.showerror('FSR 4', _('Download failed: {}', 'Не удалось скачать: {}').format(error))
-            self.ui_calls.put(done)
+            except Exception as failure:  # a broken download too (IncompleteRead)
+                error = connection_error(failure, FSR4_BASE)
+            finally:  # the button comes back whatever happened: it stayed grey (R85)
+                self.ui_calls.put(done)
         threading.Thread(target=work, daemon=True).start()
 
     def refresh_lists(self, only_if_changed=False):
@@ -4708,8 +5491,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         old = {n: v.get() for n, v in self.mod_vars.items()}
         self.mod_vars = {}
         if not available:
-            ttk.Label(self.mods_frame, text=_('No mods in {} yet.', 'В {} пока нет модов.').format(root),
-                      style='Muted.TLabel').pack(anchor='w')
+            self.wrap_within(ttk.Label(self.mods_frame, text=_('No mods in {} yet.', 'В {} пока нет модов.').format(
+                root), style='Muted.TLabel', justify='left', anchor='w'), 620).pack(fill='x')
         self.mod_rows = []
         for index, name in enumerate(self.mod_order):
             var = tk.BooleanVar(value=old.get(name, name not in profile.get('disabled', [])))
@@ -4721,8 +5504,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                       style='Muted.TLabel').pack(anchor='w', pady=(6, 0))
         # Folders that are not mods are named, with why, instead of left out silently.
         for name, problem in unrecognized(root):
-            ttk.Label(self.mods_frame, text=_('Not loaded: {}: {}', 'Не загружен: {}: {}').format(name, problem),
-                      style='Muted.TLabel', wraplength=self.px(620), justify='left').pack(anchor='w', pady=(4, 0))
+            self.wrap_within(ttk.Label(self.mods_frame, text=_('Not loaded: {}: {}', 'Не загружен: {}: {}').format(
+                name, problem), style='Muted.TLabel', justify='left', anchor='w'), 620).pack(fill='x', pady=(4, 0))
         chosen = load_json(DATA_DIR / 'patches.json', {})
         found = external_patches(Path(self.var('patches_dir', 'app').get() or DATA_DIR / 'patches'), PATCH_VERSION)
         old = {n: v.get() for n, v in self.patch_vars.items()}
@@ -4761,8 +5544,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         if name.casefold() == 'dvdroot_ps4':  # a mod extracted bare into the mods folder
             hints.append(tk.Label(row, text=_('Put this in a folder of its own (e.g. mods\\<mod name>\\dvdroot_ps4)',
                                               'Положите его в отдельную папку (например, mods\\<имя мода>\\dvdroot_ps4)'),
-                                  bg=CARD, fg=MUTED, font=(theme.BODY, 9), anchor='w', justify='left',
-                                  wraplength=px(520)))
+                                  bg=CARD, fg=MUTED, font=(theme.BODY, 9), anchor='w', justify='left'))
+            self.wrap_within(hints[0], 520)
             hints[0].pack(side='bottom', fill='x', padx=(px(4), px(10)), pady=(0, px(6)))
         label = tk.Label(row, text=name, bg=CARD, fg=TEXT, font=(theme.BODY, 10), anchor='w', cursor='hand2')
         label.pack(side='left', fill='x', expand=True, padx=(px(4), px(10)))
@@ -4829,13 +5612,48 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                 continue
             if shown == self.ini.get(key) and shown != disk[key]:
                 var.set(disk[key] == '1' if key in INI_FLAGS else disk[key])
+        # The running game writes the whole file whenever its menu saves anything. A frame rate it holds (started
+        # with, or chosen in its menu since) and writes back unchanged is no choice of its own: one the launcher
+        # saved since (set while the game ran) stays and is written again, else the game's old value came back and
+        # the next start ran with it (R88).
+        started = getattr(self, 'game_started', None) or {}  # a game started here, until its end: what it holds
+        kept = {}
         for key in MIRRORED_KEYS:  # changed by the game's PC Settings page
             var = self.vars.get(key)
-            if key in disk and disk[key] != self.ini.get(key) and                     (var is None or str(var.get()) == str(self.app.get(key))):
+            if key not in disk or disk[key] == self.ini.get(key):
+                continue
+            if key in started and disk[key] == started[key] and self.ini.get(key) is not None:
+                kept[key] = self.ini[key]
+                continue
+            if key in started:  # chosen in the game's menu: what the game holds from now on
+                started[key] = disk[key]
+            if var is None or str(var.get()) == str(self.app.get(key)):
                 self.app[key] = disk[key]
                 if var is not None:
                     var.set(disk[key])
+        if kept:
+            try:
+                save_ini(kept, lines)
+                disk, lines = load_ini()
+            except OSError:
+                pass  # written with the next save of the settings
+            note = ('Settings: ' + ', '.join(f'{key}={value}' for key, value in kept.items()) + ', set in the '
+                    'launcher while the game ran, kept (the game had written the value it held back)')
+            if note not in textfile.REPAIRS:
+                textfile.REPAIRS.append(note)
         self.ini, self.ini_lines = disk, lines
+
+    def remember_game_start(self):
+        """What the game starting now runs with: bbport.ini as run.py reads it (sync_ini compares the game's saves
+        with it)."""
+        self.game_started = {key: self.ini.get(key) for key in MIRRORED_KEYS}
+
+    def game_restarts(self):
+        """The game restarts itself (its settings menu). It saved bbport.ini before, and the new start reads that
+        file: taken first, else a save handled after this looked like the old start's values written back, and the
+        launcher's older ones replaced the choice just made in the game."""
+        self.sync_ini()
+        self.remember_game_start()
 
     def collect(self):
         """Writes settings.json, bbport.ini, mods.json and patches.json."""
@@ -4880,21 +5698,36 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             save_mouse_settings(self.remap_ini_path, self.mouse_settings, self.remap_lines)
             self.mouse_edited = False
             self.reload_input_ini()
+        # Whole or not at all, as bbport.ini: a file cut off is read as empty, and the mods' order and the ones
+        # turned off were gone.
         if self.mod_order:
-            (DATA_DIR / 'mods.json').write_text(json.dumps(
+            textfile.write(DATA_DIR / 'mods.json', json.dumps(
                 {'order': self.mod_order, 'disabled': [n for n, v in self.mod_vars.items() if not v.get()]},
-                indent=2), encoding='utf-8')
+                indent=2))
         if self.patch_vars:
             chosen = load_json(DATA_DIR / 'patches.json', {})
             shown = set(self.patch_vars)
             enabled = {k for k in chosen.get('enabled', []) if k not in shown} | {k for k, v in self.patch_vars.items() if v.get()}
             disabled = {k for k in chosen.get('disabled', []) if k not in shown} | {k for k, v in self.patch_vars.items() if not v.get()}
-            (DATA_DIR / 'patches.json').write_text(json.dumps(
-                {'enabled': sorted(enabled), 'disabled': sorted(disabled)}, indent=2), encoding='utf-8')
+            textfile.write(DATA_DIR / 'patches.json', json.dumps(
+                {'enabled': sorted(enabled), 'disabled': sorted(disabled)}, indent=2))
 
     # ---- game process ------------------------------------------------------------------------
+    def offline_only_on(self):
+        """What is on of what patches.py leaves out of an online start (its OFFLINE_ONLY, third-party patches)."""
+        names = [_(*title).split(' (')[0] for key, title, _on in CHEATS + EXTRAS
+                 if key != 'skip_intro' and self.var(key, 'ini').get()]
+        if self.patch_vars:  # the Mods page's boxes, maybe changed since patches.json was written
+            return names + [key for key, var in self.patch_vars.items() if var.get()]
+        try:
+            from patches import external_patches, external_selection
+            found = external_patches(Path(self.var('patches_dir', 'app').get() or DATA_DIR / 'patches'), PATCH_VERSION)
+            return names + [key for key, _path, _meta in external_selection(found, DATA_DIR / 'patches.json')]
+        except (OSError, ValueError, ImportError):
+            return names
+
     def play(self):
-        if self.process or self.fsr411_downloading:
+        if self.process or self.fsr411_downloading or self.update_installing():
             return
         if game_underway():
             # Started from Steam, a shortcut or the in-game restart: its window comes to the front instead of a
@@ -4916,27 +5749,41 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             online.set(bool(choice))
         pool_name = self.var('online_pool', 'app').get()
         hunters_dream = pool_name == 'huntersdream'
+        # "No: play offline this time" is this start only: it turned "Play online" off for good before
+        # (2026-11-02), and every later start from Steam or a shortcut stayed offline without a word.
+        offline_once = False
         if online.get() and hunters_dream and not self.var('thd_token', 'app').get():
             if self.messagebox.askyesno(
                     'Bloodborne', _("To play online with The Hunter's Dream, sign in with Discord first.") + '\n\n' +
                     _('Sign in now? (No: play offline this time.)')):
                 self.show('online')
                 return
-            online.set(False)
-        if online.get() and pool_name == 'supermedo' and not self.account_name():
-            # Online without an account was offline without a word (a new player, the setup's default).
-            if self.messagebox.askyesno(
-                    'Bloodborne', _('To play online with SuperMedo Server, sign in with Discord or make a free '
-                                    'account first.') + '\n\n' + _('Sign in now? (No: play offline this time.)')):
-                self.show('online')
+            offline_once = True
+        if online.get() and not offline_once and pool_name in ('supermedo', 'seamless') and not self.account_name():
+            # Online without an account was offline without a word (a new player, the setup's default). Asked with
+            # the account's three ways in: signed in there, this start goes online (it offered Discord alone and
+            # sent the player to the Online page before).
+            answer = bbport_signin.ask(self)
+            if answer is None:
                 return
-            online.set(False)
-        if online.get() and pool_name == 'shadnet' and '@' in npid.get():
+            offline_once = answer == 'offline'
+        if online.get() and not offline_once and pool_name == 'shadnet' and '@' in npid.get():
             self.messagebox.showwarning(
                 'Bloodborne', _('The Online ID is the account name (NPID) you registered on the server, '
                                 'not your email address.'))
             self.show('online')
             return
+        # Fair play: patches.py leaves cheats, debug features and third-party patches out of every online start.
+        # Asked here, so the player chooses instead of finding them gone in the game.
+        offline_only = self.offline_only_on() if online.get() and not offline_once else []
+        if offline_only:
+            choice = self.messagebox.askyesnocancel(
+                'Bloodborne', _('Cheats and debug features run offline only, fair to the other players. On now: '
+                                '{}.').format(', '.join(offline_only)) + '\n\n' +
+                _('Yes: play online without them.   No: play offline with them.'))
+            if choice is None:
+                return
+            offline_once = not choice
         if self.var('output_display', 'app').get():
             self.var('output_res', 'ini').set(display.size_text(self.game_monitor_size()))
         if not self.save_settings():
@@ -4976,14 +5823,16 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             self.messagebox.showinfo('Bloodborne', _("These are a PS4's own encrypted backups (sdimg_…); they cannot "
                                                      'be used. Export the save with Apollo Save Tool on the PS4 '
                                                      'instead.') + '\n\n' + encrypted)
-        self.auto_backup()
+        start = {**self.app, 'online': False} if offline_once else self.app  # the settings of this one start
+        self.auto_backup(start)
+        self.remember_game_start()
         try:
-            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(self.app, self.ini),
+            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(start, self.ini),
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         except OSError as error:
             self.append(_('Could not start: {}', 'Не удалось запустить: {}').format(error) + '\n')
-            self.process = None
+            self.process = self.game_started = None
             return
         self.job = GameJob(self.process)
         self.placer = display.Placer(self.app, display.parse_size(self.ini.get('output_res')) or (1920, 1080)).start()
@@ -5000,13 +5849,15 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         elif self.setting('on_play') == 'minimize':
             self.root.after(5000, lambda: self.process and self.root.state() == 'normal' and self.minimize())
 
-    def auto_backup(self):
-        """Before a start: the saves backed up when they changed since the last backup (never in the way)."""
+    def auto_backup(self, start=None):
+        """Before a start: the saves backed up when they changed since the last backup (never in the way). `start`:
+        that start's settings, so the saves it plays are the ones backed up (offline this once: the normal ones)."""
         if not self.app.get('auto_backup', True):
             return
         notes = []
         try:
-            made = saves.auto_backup(self.save_user_dir(), self.app['game_dir'], notes=notes)
+            made = saves.auto_backup(saves_user_dir(start) if start else self.save_user_dir(), self.app['game_dir'],
+                                     notes=notes)
         except OSError as error:
             self.append(_('The automatic backup of the saves failed: {}').format(error) + '\n')
             return
@@ -5024,16 +5875,28 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
     def read_output(self, process, before=''):
         """Helper thread: the game's output to the Log page and to <saves folder>/last_run.log, after `before`
-        (what the Log page said before the start: the repairs made for it)."""
-        log = None
+        (what the Log page said before the start: the repairs made for it). The game's end always reaches the
+        window, and nothing about the log file stops the reading (RunLog): an unread pipe freezes the game."""
+        log = RunLog(Path(self.app.get('user_dir') or DATA_DIR / 'user') / 'last_run.log', self.output.put)
+        if before:
+            log.write(before)
         try:
-            log_dir = Path(self.app.get('user_dir') or DATA_DIR / 'user')
-            log_dir.mkdir(parents=True, exist_ok=True)
-            log = open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1)
-            if before:
-                log.write(before)
-        except OSError:
-            pass
+            self.forward_output(process, log)
+        except Exception as error:
+            # Nothing expected (the log file is RunLog's): the error to the window like a Tk callback's, and the rest
+            # of the output read all the same before the wait below, as an unread pipe freezes the game.
+            self.ui_calls.put(lambda e=error: self.root.report_callback_exception(type(e), e, e.__traceback__))
+            try:
+                while process.stdout.read(1 << 16):
+                    pass
+            except Exception:  # the pipe itself broke: nothing left to read
+                pass
+        finally:
+            log.close()
+            self.output.put((process.wait(),))
+
+    def forward_output(self, process, log):
+        """read_output's lines: to the Log page (drain_output), the eboot warnings, and the log file."""
         warned = False
         for raw in iter(process.stdout.readline, b''):
             text = raw.decode('utf-8', errors='replace')
@@ -5043,9 +5906,9 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                 self.ui_calls.put(lambda: self.messagebox.showwarning('Bloodborne', _(
                     'Your eboot.bin is not the clean 1.09 one (modified, or from another release). The port '
                     'cannot patch it: the game runs at 30 FPS in 16:9 (ultrawide and the output resolution '
-                    'do not apply), the Game & effects options do nothing, and some scenes (like the '
-                    'cutscene after Rom) can freeze.\n\nReplace eboot.bin with the one from an unmodified '
-                    '1.09 update.')))
+                    'do not apply), the effects (All graphics > Effects, Picture & performance > Taste) and the '
+                    'gameplay tweaks (Gameplay) do nothing, and some scenes (like the cutscene after Rom) can '
+                    'freeze.\n\nReplace eboot.bin with the one from an unmodified 1.09 update.')))
             elif not warned and 'eboot.bin is modified, not the clean 01.09 build' in text:
                 # Some patch groups still apply (run.py): the line says which are off.
                 warned = True
@@ -5054,83 +5917,130 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                     "Your eboot.bin has been modified (for example with a 60 FPS patch already applied). "
                     "Part of the port's patches cannot be used with it:\n\n{}\n\nFor every option, "
                     "replace eboot.bin with the one from an unmodified 1.09 update.").format(detail)))
-            if log:
-                log.write(text.replace('\r\n', '\n'))
-        if log:
-            log.close()
-        self.output.put((process.wait(),))
+            log.write(text.replace('\r\n', '\n'))
 
     def drain_output(self):
-        if self.process:
-            try:
-                stamp = ini_path().stat().st_mtime_ns
-                # Wait for a stable write before merging an overlay save into the UI.
-                if stamp == getattr(self, '_shared_ini_seen', None) and stamp != getattr(self, '_shared_ini_synced', None):
-                    self.sync_ini()
-                    self._shared_ini_synced = stamp
-                self._shared_ini_seen = stamp
-            except OSError:
-                pass
-        while not self.ui_calls.empty():
-            try:
-                self.ui_calls.get_nowait()()
-            except Exception:  # reported like any Tk callback; this loop must keep running
-                self.root.report_callback_exception(*sys.exc_info())
+        """Every 100 ms on the Tk thread: the helper threads' calls (ui_calls) and the game's output. Each part on
+        its own, and the next round planned whatever happens: one failing call stopped every later answer to the
+        window (a finished download, the game's end, so Play stayed disabled). A failure is reported like a Tk
+        callback's (reported)."""
+        closed = False
+        try:
+            if self.process:
+                self.reported(self.follow_shared_ini)
+            while not self.ui_calls.empty():
+                self.reported(self.ui_calls.get_nowait())
+            self.reported(self.tidy_up)
+            closed = self.reported(self.take_output)
+        finally:
+            if not closed:  # the window closed with the game: no next round
+                self.root.after(100, self.drain_output)
+
+    def reported(self, call, *args):
+        """call(*args); an error in it goes to callback_error like a Tk callback's (the Log page and a message), once
+        per error: a part of drain_output that fails in every round would fill the Log page. None then."""
+        try:
+            return call(*args)
+        except Exception:
+            import traceback
+            kind, value, trace = sys.exc_info()
+            seen = self.__dict__.setdefault('drain_errors', set())
+            text = ''.join(traceback.format_exception(kind, value, trace))
+            if text not in seen:
+                seen.add(text)
+                self.root.report_callback_exception(kind, value, trace)
+            return None
+
+    def follow_shared_ini(self):
+        """While the game runs: bbport.ini saved by the in-game menu, merged into the pages."""
+        try:
+            stamp = ini_path().stat().st_mtime_ns
+            # Wait for a stable write before merging an overlay save into the UI.
+            if stamp == getattr(self, '_shared_ini_seen', None) and stamp != getattr(self, '_shared_ini_synced', None):
+                self.sync_ini()
+                self._shared_ini_synced = stamp
+            self._shared_ini_seen = stamp
+        except OSError:
+            pass
+
+    def tidy_up(self):
+        """Python's collector on the Tk thread (see gc.disable in __init__), and the picture a minimize put over the
+        window taken away when the minimize did not happen."""
         if time.monotonic() - self._collected > 2:
             gc.collect()
             self._collected = time.monotonic()
         frame = self.custom_frame
         if frame and frame.cover and time.monotonic() - frame.cover_time > 1.5 and self.root.state() != 'iconic':
             self.uncover_window()  # a minimize that did not happen: the picture never stays over the window
-        try:
-            for _i in range(500):
+
+    def take_output(self):
+        """Up to 500 of the game's lines (read_output) to the Log page, and its end. True when the window closed
+        with the game."""
+        for _i in range(500):
+            try:
                 item = self.output.get_nowait()
-                if isinstance(item, tuple):
-                    self.append(_('\n— the game exited (code {}) —\n', '\n— игра завершилась (код {}) —\n').format(item[0]))
-                    self.process = None
-                    self.sync_ini()
-                    self.refresh_fsr411()
-                    if self.job:
-                        self.job.close()
-                    self.refresh_saves()  # the characters' times
-                    if self.placer:
-                        self.placer.stop()
-                        self.window_left(self.placer.last)
-                        self.placer = None
-                    self.stop_button.configure(state='disabled')
-                    self.stop_button.pack_forget()
-                    self.forget_refused_sign_in()
-                    self.refresh_status()
-                    reopen = self.setting('reopen_after_game')
-                    if self.hidden:
-                        if item[0] == 0 and not reopen:
-                            self.drop_tray()
-                            self.root.destroy()
-                            return
-                        # Back (asked for, or it stopped with an error: then with its log).
-                        self.hidden = False
-                        self.bring_back()
-                        if item[0] != 0:
-                            self.show('log')
-                    elif reopen:
-                        self.bring_back()
-                    self.root.after(300, lambda code=item[0]: self.after_exit(code))  # the known causes in its log
-                else:
-                    if 'Entering original x86-64 code' in item:
-                        self.status.configure(text=_('The game is running.', 'Игра запущена.'), fg=GOLD)
-                    elif 'restarting through run.py' in item:
-                        self.status.configure(text=_('Restarting with the new settings…', 'Перезапуск с новыми настройками…'), fg=GOLD)
-                    elif any(text in item for text, _topic in bbport_help.GAME_NOTICES):
-                        # Said once the game closes (after_exit).
-                        notices = self.__dict__.setdefault('game_notices', [])
-                        notices += [topic for text, topic in bbport_help.GAME_NOTICES
-                                    if text in item and topic not in notices]
-                    elif 'Runtime: trophy ' in item:
-                        self.trophies_changed(self.tracker.observe(item))
-                    self.append(item)
-        except queue.Empty:
-            pass
-        self.root.after(100, self.drain_output)
+            except queue.Empty:
+                break
+            if isinstance(item, tuple):
+                if self.game_ended(item[0]):
+                    return True
+            else:
+                self.reported(self.game_line, item)
+        return False
+
+    def game_ended(self, code):
+        """The game's end (read_output's last item). The steps that read files or the game's leftovers each on their
+        own (reported): one that failed left Play disabled and Stop shown. True when the window closed with it."""
+        self.process = None
+        self.append(_('\n— the game exited (code {}) —\n', '\n— игра завершилась (код {}) —\n').format(code))
+        self.reported(self.sync_ini)
+        self.game_started = None  # the frame rate the launcher now follows again (sync_ini)
+        self.reported(self.refresh_fsr411)
+        if self.job:
+            self.reported(self.job.close)
+        self.reported(self.refresh_saves)  # the characters' times
+        if self.placer:
+            placer, self.placer = self.placer, None
+            placer.stop()
+            self.reported(self.window_left, placer.last)
+        self.stop_button.configure(state='disabled')
+        self.stop_button.pack_forget()
+        self.reported(self.forget_refused_sign_in)
+        self.reported(self.refresh_status)
+        reopen = self.setting('reopen_after_game')
+        if self.hidden:
+            if code == 0 and not reopen:
+                self.drop_tray()
+                self.root.destroy()
+                return True
+            # Back (asked for, or it stopped with an error: then with its log).
+            self.hidden = False
+            self.bring_back()
+            if code != 0:
+                self.show('log')
+        elif reopen:
+            self.bring_back()
+        self.root.after(300, lambda: self.after_exit(code))  # the known causes in its log
+        return False
+
+    def game_line(self, item):
+        """One line of the game's output to the Log page first, then what it changes: the status line, a notice for
+        after the game, a trophy. The line is what the helpers look for: one of those that failed (a trophy toast
+        that raised) took it from the page."""
+        self.append(item)
+        if 'Entering original x86-64 code' in item:
+            self.status.configure(text=_('The game is running.', 'Игра запущена.'), fg=GOLD)
+        elif 'restarting through run.py' in item:
+            self.status.configure(text=_('Restarting with the new settings…', 'Перезапуск с новыми настройками…'),
+                                  fg=GOLD)
+            self.game_restarts()
+        elif any(text in item for text, _topic in bbport_help.GAME_NOTICES):
+            # Said once the game closes (after_exit).
+            notices = self.__dict__.setdefault('game_notices', [])
+            notices += [topic for text, topic in bbport_help.GAME_NOTICES
+                        if text in item and topic not in notices]
+        elif 'Runtime: trophy ' in item:
+            self.trophies_changed(self.tracker.observe(item))
 
     def forget_refused_sign_in(self):
         """After the game: a sign-in The Hunter's Dream refused is forgotten (forget_sign_in), with a line in
@@ -5188,11 +6098,16 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         os.startfile(str(path))
 
     # ---- updates -------------------------------------------------------------------------------
+    def check_update_now(self):
+        """The Check for updates buttons (Help, Advanced): asked at once, the answer either way."""
+        threading.Thread(target=self.check_update, args=(True,), daemon=True).start()
+
     def check_update(self, manual=False):
-        """Helper thread: asks GitHub for the newest release (and a beta for the next beta) and offers it."""
+        """Helper thread: asks GitHub for the newest release (and a beta for the next beta) and offers it. Asked by
+        the button, it always answers: a broken reply (BadStatusLine) ended the thread without a word."""
         try:
             offer = update_to_offer()
-        except (OSError, ValueError, KeyError) as failure:
+        except Exception as failure:
             if manual:
                 self.ui_calls.put(lambda error=connection_error(failure, RELEASES_API): self.messagebox.showerror(
                     'Bloodborne', _('Could not check for updates: {}', 'Не удалось проверить обновления: {}').format(error)))
@@ -5219,7 +6134,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         buttons.pack(fill='x', padx=12, pady=(0, 12))
         buttons.columnconfigure((0, 1), weight=1, uniform='update')
         self.update_button = ttk.Button(buttons, text=_('Update', 'Обновить'), style='Card.Tight.Accent.TButton',
-                                        command=lambda: self.install_update(version, url, page))
+                                        command=lambda: self.install_update(version, url, page),
+                                        state='disabled' if self.updating else 'normal')
         self.update_button.grid(row=0, column=0, sticky='we')
         ttk.Button(buttons, text=_("What's new", 'Что нового'), style='Card.Tight.TButton',
                    command=lambda: webbrowser.open(page)).grid(row=0, column=1, sticky='we', padx=(6, 0))
@@ -5233,21 +6149,34 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
 
     def install_update(self, version, url, page):
         """The side box's Update button."""
-        def progress(percent):
-            self.update_label.configure(text=_('Downloading version {}… {}%', 'Загрузка версии {}… {}%').format(
-                version, percent))
+        def say(text):
+            self.update_label.configure(text=text)
 
         def failed():
-            self.update_button.configure(state='normal')
-            self.update_label.configure(text=_('Version {} is available.', 'Доступна версия {}.').format(version))
-        if self.install_version(version, url, page, progress, failed):
-            self.update_button.configure(state='disabled')
+            say(_('Version {} is available.', 'Доступна версия {}.').format(version))
+        self.install_version(version, url, page, say, failed)
 
-    def install_version(self, version, url, page, progress, failed):
-        """Downloads release `version` and lets its launcher copy itself over this installation
-        (saves, settings and mods stay). False when nothing was started."""
+    def update_buttons(self):
+        """The side box's Update and Other versions' Install, off while an update is under way: two at once shared
+        one download folder, and the second one's start took the first one's files away."""
+        state = 'disabled' if self.updating else 'normal'
+        button = getattr(self, 'update_button', None)
+        if button is not None and button.winfo_exists():
+            button.configure(state=state)
+        if self.versions_listed and self.version_window and self.version_window.winfo_exists():
+            self.version_install.configure(state=state)
+
+    def install_version(self, version, url, page, say, failed):
+        """Downloads release `version`, checks it and starts an installer that puts it in place of this installation
+        once this launcher has closed (saves, settings and mods stay; bbport_update). say(text) shows how far it is,
+        failed() puts the caller's view back. One update at a time; False when nothing was started."""
+        if self.updating:
+            return False
         if self.game_running():
             self.messagebox.showinfo('Bloodborne', _('Close the game before updating.', 'Закройте игру перед обновлением.'))
+            return False
+        if self.test_running():  # its game runs from the files the update replaces
+            self.messagebox.showinfo('Bloodborne', _('A game test is running. Update when it has finished.'))
             return False
         if not FROZEN or not url:  # a source tree updates with git
             webbrowser.open(page)
@@ -5264,12 +6193,17 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                          'настройки останутся.')
         if not self.messagebox.askyesno('Bloodborne', question.format(version)):
             return False
+        self.updating = True
+        self.update_buttons()
+        digest = ASSET_DIGESTS.get(url)
 
         def work():
+            folder = None
             try:
-                shutil.rmtree(UPDATE_DIR, ignore_errors=True)
                 UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-                archive = UPDATE_DIR / 'update.zip'
+                # A folder of its own: no leftover and no other download mixes into it.
+                folder = Path(tempfile.mkdtemp(prefix=re.sub(r'[^\w.]+', '-', f'v{version}') + '-', dir=UPDATE_DIR))
+                archive = folder / 'update.zip'
                 request = urllib.request.Request(url, headers={'User-Agent': 'bbport-launcher'})
                 with bbport_tls.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
                     total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
@@ -5279,27 +6213,79 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                         percent = done * 100 // total if total else 0
                         if percent != shown:
                             shown = percent
-                            self.ui_calls.put(lambda p=percent: progress(p))
+                            self.ui_calls.put(lambda p=percent: say(_('Downloading version {}… {}%',
+                                                                      'Загрузка версии {}… {}%').format(version, p)))
+                self.ui_calls.put(lambda: say(_('Checking the download…')))
+                inside = updater.check_package(archive, digest)  # before anything is unpacked or replaced
                 with zipfile.ZipFile(archive) as package:
-                    package.extractall(UPDATE_DIR / 'new')
+                    package.extractall(folder / 'new')
+                    listed = updater.listed_files(package, inside)
                 archive.unlink()
-                new = next((p.parent for p in (UPDATE_DIR / 'new').rglob('Bloodborne.exe')), None)
-                if not new:
-                    raise OSError('Bloodborne.exe is missing from the download')
-                # The new launcher copies itself over this installation once this one has closed.
-                subprocess.Popen([str(new / 'Bloodborne.exe'), '--install-update', str(PORT_DIR), str(os.getpid())],
-                                 cwd=str(new), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
-                self.ui_calls.put(self.root.destroy)
-            except (OSError, zipfile.BadZipFile) as failure:
-                def show_failure(error=connection_error(failure, url)):
-                    failed()
-                    self.messagebox.showerror('Bloodborne', _('Update failed: {}', 'Не удалось обновить: {}').format(error))
-                self.ui_calls.put(show_failure)
+                # What the copy in the installation must hold, whatever happens to the unpacked files until then.
+                (folder / 'files.json').write_text(json.dumps(listed), encoding='utf-8')
+                installer = update_installer(folder)
+            except Exception as failure:  # whatever it was (a broken HTTP answer is no OSError), the buttons come back
+                self.ui_calls.put(lambda error=connection_error(failure, url) or type(failure).__name__:
+                                  self.update_failed(failed, error, folder))
+                return
+            self.ui_calls.put(lambda: self.start_installer(version, installer, folder, folder / 'new' / inside, say,
+                                                           failed))
         threading.Thread(target=work, daemon=True).start()
         return True
 
+    def update_failed(self, failed, error, folder=None):
+        """The update stopped before the launcher closed: the buttons come back, and the attempt's folder goes (a
+        player retrying a broken download filled the system drive with them)."""
+        if folder:
+            shutil.rmtree(folder, ignore_errors=True)
+        self.updating = self.installing = False
+        self.update_buttons()
+        failed()
+        self.messagebox.showerror('Bloodborne', _('Update failed: {}', 'Не удалось обновить: {}').format(error))
+
+    def update_installing(self):
+        """True while the installer starts and this launcher is about to close for it (the status line says so): a
+        game or a game test started now would keep the launcher open (close() only hides it while a game runs), and
+        the installer would wait for their files."""
+        if not getattr(self, 'installing', False):
+            return False
+        self.status.configure(text=_('An update is being installed. The launcher opens by itself when it is done.'),
+                              fg=GOLD)
+        return True
+
+    def start_installer(self, version, installer, folder, new, say, failed):
+        """The download is checked: the installer starts, and once it holds the update mutex (then a second start can
+        no longer take its files away) this launcher closes the usual way, settings saved and the tray icon gone. A
+        game or a game test started during the download is waited for first; from here on none starts."""
+        if self.game_running() or self.test_running():
+            say(_('Version {} is downloaded: it installs once the game is closed.').format(version))
+            self.root.after(2000, lambda: self.start_installer(version, installer, folder, new, say, failed))
+            return
+        self.installing = True
+        say(_('Starting the installation…'))
+        env = {key: value for key, value in os.environ.items() if not key.upper().startswith('BB_UPDATE_')}
+        env.update(BB_UPDATE_FROM=str(new), BB_UPDATE_VERSION=version, BB_UPDATE_FILES=str(folder / 'files.json'))
+        try:
+            process = subprocess.Popen([str(installer), '--install-update', str(PORT_DIR), str(os.getpid())],
+                                       cwd=str(installer.parent), stdin=subprocess.DEVNULL, env=env,
+                                       creationflags=NO_WINDOW)
+        except OSError as failure:
+            self.update_failed(failed, _('the new version did not start ({}). An antivirus program may have stopped '
+                                         'it.').format(failure), folder)
+            return
+
+        def wait():
+            problem = updater.wait_for_installer(process)
+            if problem is None:
+                self.ui_calls.put(self.close)
+            else:
+                self.ui_calls.put(lambda: self.update_failed(failed, _(
+                    'the new version did not start ({}). An antivirus program may have stopped it.').format(problem),
+                    folder))
+        threading.Thread(target=wait, daemon=True).start()
+
     def choose_version(self):
-        """Advanced > Other versions: any release from OLDEST_INSTALLABLE on, chosen by the player."""
+        """Help or Advanced > Other versions: any release from OLDEST_INSTALLABLE on, chosen by the player."""
         if self.version_window and self.version_window.winfo_exists():
             self.version_window.lift()
             return
@@ -5325,6 +6311,7 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         buttons.pack(anchor='w', pady=(12, 0))
         install = ttk.Button(buttons, text=_('Install', 'Установить'), state='disabled')
         install.pack(side='left')
+        self.version_install, self.versions_listed = install, False
         notes = ttk.Button(buttons, text=_("What's new", 'Что нового'), state='disabled')
         notes.pack(side='left', padx=6)
         ttk.Button(buttons, text=_('Close', 'Закрыть'), command=window.destroy).pack(side='left')
@@ -5354,7 +6341,8 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                             if version_tuple(v) == version_tuple(VERSION)), 0)
             box.current(current)
             status.configure(text=_('Installed: v{}', 'Установлена: v{}').format(VERSION))
-            install.configure(state='normal')
+            self.versions_listed = True
+            install.configure(state='disabled' if self.updating else 'normal')  # the side box's may run
             notes.configure(state='normal')
 
         def failed_list(error):
@@ -5372,18 +6360,15 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                                                          'Версия {} уже установлена.').format(version))
                 return
 
-            def progress(percent):
+            def say(text):
                 if window.winfo_exists():
-                    status.configure(text=_('Downloading version {}… {}%', 'Загрузка версии {}… {}%').format(
-                        version, percent))
+                    status.configure(text=text)
 
             def failed():
                 if window.winfo_exists():
-                    install.configure(state='normal')
                     box.configure(state='readonly')
                     status.configure(text=_('Installed: v{}', 'Установлена: v{}').format(VERSION))
-            if self.install_version(version, url, page, progress, failed):
-                install.configure(state='disabled')
+            if self.install_version(version, url, page, say, failed):
                 box.configure(state='disabled')
 
         install.configure(command=on_install)
@@ -5392,19 +6377,32 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
         def fetch():
             try:
                 versions = installable_releases()
-            except (OSError, ValueError, KeyError, TypeError) as failure:
-                self.ui_calls.put(lambda error=failure: failed_list(error))
+            except Exception as failure:  # a broken reply too: never "Loading the list of versions…" for good
+                self.ui_calls.put(lambda error=connection_error(failure, RELEASES_LIST_API): failed_list(error))
                 return
             self.ui_calls.put(lambda: show(versions))
         threading.Thread(target=fetch, daemon=True).start()
 
     def clear_cache(self):
-        """Shader and pipeline caches; they are rebuilt while playing."""
-        if self.process:
+        """Shader and pipeline caches; they are rebuilt while playing. Not while a game runs, also one started
+        through Steam or a shortcut (game_running): it holds them open. The button then did nothing, or said
+        "cleared" over files it could not delete: now what was left is said."""
+        if self.game_running():
+            self.messagebox.showinfo('Bloodborne', _('Close the game first: it uses the shader cache while it runs.'))
             return
-        import shutil
         cache = cache_folder(self.app) / 'cache'
-        shutil.rmtree(cache, ignore_errors=True)
+        left = []
+        if cache.exists():
+            def failed(_function, _path, error):
+                left.append(error_text(error[1] if isinstance(error, tuple) else error))
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(cache, onexc=failed)
+            else:
+                shutil.rmtree(cache, onerror=failed)
+        if left:
+            self.messagebox.showerror('Bloodborne', _('Part of the shader cache could not be deleted: {}').format(
+                left[0]))
+            return
         self.messagebox.showinfo('Bloodborne', _('Shader cache cleared. The next start stutters for a few minutes while '
                                                  'it is rebuilt.', 'Кэш шейдеров очищен. Следующий запуск несколько '
                                                  'минут будет подтормаживать, пока кэш собирается заново.'))
@@ -5429,7 +6427,13 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             self.messagebox.showerror('Bloodborne', result.stderr.decode(errors='replace')[:400])
 
     def add_to_steam(self):
-        """Bloodborne in the Steam library (a non-Steam game that starts Play Bloodborne.exe)."""
+        """Bloodborne in the Steam library (a non-Steam game that starts Play Bloodborne.exe). Steam has to close
+        for it: the wait for that (up to half a minute) and the writing run in a helper thread, as the window froze
+        while it waited on the Tk thread. The window closed meanwhile only hides until it is done (close)."""
+        if getattr(self, 'steam_adding', False):  # a second click while the first one waits for Steam
+            self.messagebox.showinfo('Bloodborne', _('Bloodborne is still being added to Steam: Steam closes for it '
+                                                     'first, which can take up to half a minute.'))
+            return
         import bbport_steam
         steam = bbport_steam.steam_folder()
         configs = bbport_steam.user_configs(steam) if steam else []
@@ -5442,32 +6446,48 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             pythonw = Path(sys.executable).with_name('pythonw.exe')
             exe, options = (pythonw if pythonw.exists() else Path(sys.executable)), f'"{Path(__file__).resolve()}" --play'
         self.collect()  # Play Bloodborne.exe starts the game with the saved settings
-        restart = False
-        if bbport_steam.steam_running():
-            if not self.messagebox.askyesno('Bloodborne', _('Steam has to close while the game is added; it starts '
-                                                            'again afterwards. Close Steam now?')):
-                return
-            subprocess.Popen([str(steam / 'steam.exe'), '-shutdown'], creationflags=NO_WINDOW)
-            for _i in range(60):
-                time.sleep(0.5)
-                if not bbport_steam.steam_running():
-                    break
-            else:
-                self.messagebox.showerror('Bloodborne', _('Steam did not close. Close it yourself and try again.'))
-                return
-            time.sleep(1)  # Steam writes its files as it exits
-            restart = True
-        try:
-            for config in configs:
-                bbport_steam.add_shortcut(config / 'shortcuts.vdf', 'Bloodborne', str(exe), str(PORT_DIR),
-                                          str(exe), options)
-        except (OSError, ValueError) as error:
-            self.messagebox.showerror('Bloodborne', _('Could not add the game to Steam: {}').format(error))
+        running = bbport_steam.steam_running()
+        if running and not self.messagebox.askyesno('Bloodborne', _('Steam has to close while the game is added; it '
+                                                                    'starts again afterwards. Close Steam now?')):
             return
-        if restart:
-            os.startfile('steam://open/games')
-        self.messagebox.showinfo('Bloodborne', _('Bloodborne is in your Steam library. It starts with the settings '
-                                                 'saved in this launcher.'))
+        self.steam_adding = True
+        problem = None
+
+        def done():
+            self.steam_adding = False
+            closing = self.__dict__.pop('close_after_steam', False)  # the window was closed while it waited
+            if problem:
+                self.messagebox.showerror('Bloodborne', problem)
+            else:
+                if running:
+                    os.startfile('steam://open/games')
+                if not closing:  # closed, Steam's library with the game is the answer
+                    self.messagebox.showinfo('Bloodborne', _('Bloodborne is in your Steam library. It starts with '
+                                                             'the settings saved in this launcher.'))
+            if closing:
+                self.close()
+
+        def work():
+            nonlocal problem
+            try:
+                if running:
+                    subprocess.Popen([str(steam / 'steam.exe'), '-shutdown'], creationflags=NO_WINDOW)
+                    for _i in range(60):
+                        time.sleep(0.5)
+                        if not bbport_steam.steam_running():
+                            break
+                    else:
+                        problem = _('Steam did not close. Close it yourself and try again.')
+                        return
+                    time.sleep(1)  # Steam writes its files as it exits
+                for config in configs:
+                    bbport_steam.add_shortcut(config / 'shortcuts.vdf', 'Bloodborne', str(exe), str(PORT_DIR),
+                                              str(exe), options)
+            except Exception as error:  # the button always answers
+                problem = _('Could not add the game to Steam: {}').format(error_text(error))
+            finally:
+                self.ui_calls.put(done)
+        threading.Thread(target=work, daemon=True).start()
 
     def close(self):
         if self.test_running():  # a game test: its game must not stay behind
@@ -5479,6 +6499,12 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
             self.collect()
         except Exception:  # never keep the window open over a settings problem
             pass
+        if getattr(self, 'steam_adding', False):
+            # Add to Steam waits for Steam to close or writes shortcuts.vdf: ended now, Steam stayed closed and a
+            # cut-off shortcuts.vdf lost every non-Steam game in it. Hidden, the launcher closes once it is done.
+            self.close_after_steam = True
+            self.root.withdraw()
+            return
         if self.process:
             # The game's output still comes through this process (Log page, last_run.log). An
             # exited launcher closed that pipe, and the next line a preparation script or the
@@ -5510,6 +6536,41 @@ class GameJob:
         if self.handle:
             ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(self.handle))
             self.handle = None
+
+
+class RunLog:
+    """<saves folder>/last_run.log as read_output writes it. A write that fails (a full drive) ends the logging, not
+    the reading: the reader thread died with it, the game's output pipe filled up and the game froze, with the
+    launcher saying "running" and Stop doing nothing. `note(text)` says it once (on the Log page)."""
+
+    def __init__(self, path, note, opener=open):
+        self.path, self.note, self.file = Path(path), note, None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.file = opener(self.path, 'w', encoding='utf-8', buffering=1)
+        except Exception as error:
+            self.failed(error)
+
+    def write(self, text):
+        if self.file is None:
+            return
+        try:
+            self.file.write(text)
+        except Exception as error:
+            self.failed(error)
+
+    def failed(self, error):
+        self.close()
+        self.note(_("{0} could not be written ({1}): the rest of this game's log is only on this page.").format(
+            self.path, error_text(error)) + '\n')
+
+    def close(self):
+        file, self.file = self.file, None
+        if file is not None:
+            try:
+                file.close()  # its last line may still fail to reach a full drive: nothing more to do
+            except Exception:
+                pass
 
 
 def folder_entries(folder, names=None):
@@ -5583,7 +6644,23 @@ def connection_error(error, url):
                      'Дата на вашем ПК неверна ({}), поэтому защищённые соединения не работают. Установите дату в '
                      'Windows: Параметры > Время и язык > Дата и время, «Установить время автоматически».').format(
                 time.strftime('%d.%m.%Y'))
-    return str(error)
+    return error_text(error)
+
+
+def error_text(error, kind=False):
+    """An error a helper thread caught, in a few words: its own text, with its kind only where the text alone says
+    little (BadStatusLine('') reads "''", KeyError('tag_name') "'tag_name'", http.client's other errors a bare piece
+    of the reply) or where `kind` asks for it (a Log page line about an error nobody expected); never empty. A text
+    that says what happened stays as it is: "FetchError: " or "BadZipFile: " in front of it read worse to players."""
+    import http.client
+    name, text = type(error).__name__, str(error).strip()
+    if not text or text in ("''", '""'):
+        return name
+    if text.startswith(name):
+        return text
+    quoted = len(text) > 1 and text[0] == text[-1] and text[0] in '\'"'
+    bare_reply = isinstance(error, http.client.HTTPException) and not isinstance(error, OSError)
+    return f'{name}: {text}' if kind or quoted or bare_reply else text
 
 
 # What the game logs when The Hunter's Dream refuses the saved sign-in (gpu/bbnet/thd/thd_session.cpp MarkRefused).
@@ -5614,8 +6691,7 @@ def needs_sign_in(settings):
     game would stay offline without a word. A start from Steam or a shortcut opens the launcher, whose Play asks."""
     if not settings.get('online') or pool_account(settings):
         return False
-    pool = settings.get('online_pool', 'supermedo')
-    return pool == 'supermedo' or (pool == 'huntersdream' and HUNTERS_DREAM_POOL)
+    return chosen_pool(settings) in ('supermedo', 'huntersdream', 'seamless')
 
 
 def custom_output(size, settings):
@@ -5679,14 +6755,20 @@ def start_problem(settings):
     problem = bbport_help.system_problem(settings.get('game_dir'))
     if problem:
         return problem, 'game'
-    # A saves folder of the player's own on a drive that is not connected, or renamed: an empty one made in its
-    # place would show no characters, and the game would start new ones there.
+    problem = missing_saves_folder(settings)
+    return (problem, 'saves') if problem else None
+
+
+def missing_saves_folder(settings):
+    """The message for a saves folder of the player's own on a drive that is not connected, or renamed: an empty
+    one made in its place would show no characters, and the game would start new ones there. None when it is there
+    or none is set (this port's own, user/, is made at the start)."""
     user = str(settings.get('user_dir') or '').strip()
     if user and not Path(user).is_dir():
         return _('The saves folder {} is not there: its drive is not connected, or the folder was renamed or moved. '
                  'Connect the drive, or choose the saves folder again.',
                  'Папки сохранений {} нет: её диск не подключён, или папку переименовали или переместили. Подключите '
-                 'диск или выберите папку сохранений заново.').format(user), 'saves'
+                 'диск или выберите папку сохранений заново.').format(user)
     return None
 
 
@@ -5706,14 +6788,22 @@ def play_without_window(settings):
     present = {line.split('=', 1)[0].strip() for line in lines
                if '=' in line and not line.lstrip().startswith('#')}
     missing = {key: values[key] for key in ('upscaler', 'fsr411_backend') if key not in present}
+    # A read-only or locked bbport.ini stopped the start with a traceback: the game starts with what the file
+    # holds, and the log says what could not be written.
     if missing:
-        save_ini(missing, lines)
-        lines = ini_path().read_text(encoding='utf-8').splitlines()
+        try:
+            save_ini(missing, lines)
+            lines = ini_path().read_text(encoding='utf-8').splitlines()
+        except OSError as error:
+            ini_not_written(error, missing)
     if settings.get('output_display'):  # the game monitor's own size, as the launcher's Play does
         m = display.monitor(settings.get('game_monitor', ''))
         if m and values.get('output_res') != display.size_text(m.size):
             values['output_res'] = display.size_text(m.size)
-            save_ini({key: values[key] for key in INI_DEFAULTS}, lines)
+            try:
+                save_ini({key: values[key] for key in INI_DEFAULTS}, lines)
+            except OSError as error:
+                ini_not_written(error, {'output_res': values['output_res']})
     own = own_output(settings, values.get('output_res'))
     if own:  # the player's own size, which the game's menu wrote as 1920x1080 (custom_output)
         values['output_res'] = own
@@ -5728,9 +6818,17 @@ def play_without_window(settings):
     if encrypted:
         notes.append(f'Saves: {encrypted} holds an encrypted PS4 save (sdimg_): it cannot be used; export it with '
                      'Apollo Save Tool on the PS4')
+    offline = signed_out_server(settings)
+    if offline:
+        # A shortcut or Steam has no Play button to ask for the sign-in: online without the chosen server's
+        # account, the game was signed out and said it can't connect to the Bloodborne network (30.10.2026).
+        # This start plays offline, as Play does when the player says No.
+        settings = {**settings, 'online': False}
+        notes.append(f"Online: not signed in to {offline}, so this start plays offline; sign in on the launcher's "
+                     'Online play page to play online')
     if settings.get('auto_backup', True):
         try:
-            saves.auto_backup(Path(settings.get('user_dir') or DATA_DIR / 'user'), settings['game_dir'], notes=notes)
+            saves.auto_backup(saves_user_dir(settings), settings['game_dir'], notes=notes)
         except OSError:
             pass  # never in the way of a start
     placer = display.Placer(settings, display.parse_size(values.get('output_res')) or (1920, 1080)).start()
@@ -5815,20 +6913,20 @@ def newer_beta():
 def update_to_offer():
     """(version, zip URL, page URL) the launcher offers, or None. A newer release; for a beta also its
     own version's release (the beta's goal), else the next beta, so testers move from beta to beta
-    and on to the release without downloading by hand. Raises OSError/ValueError/KeyError when no
-    check answered."""
+    and on to the release without downloading by hand. Raises the first error when no check answered (any
+    kind: a broken reply from a proxy is no OSError, and a beta still asks for the next beta then)."""
     failure = None
     try:
         version, url, page = latest_release()
         newer = version_tuple(version) > version_tuple(VERSION)
         if newer or (BETA and version_tuple(version) == version_tuple(VERSION)):
             return version, url, page
-    except (OSError, ValueError, KeyError) as error:
+    except Exception as error:
         failure = error
     if BETA:
         try:
             return newer_beta()
-        except (OSError, ValueError, KeyError) as error:
+        except Exception as error:
             failure = failure or error
     if failure:
         raise failure
@@ -5844,7 +6942,11 @@ def game_zip(release):
     named = [asset for asset in zips if asset['name'].lower() == 'bloodborne-windows.zip']
     games = named or [asset for asset in zips
                       if not re.search(r'(^|[-_.])(src|source|sources)([-_.]|$)', asset['name'].lower())]
-    return games[0]['browser_download_url'] if len(games) == 1 else None
+    if len(games) != 1:
+        return None
+    if games[0].get('digest'):  # GitHub lists "sha256:…" for its assets: install_version checks the download
+        ASSET_DIGESTS[games[0]['browser_download_url']] = games[0]['digest']
+    return games[0]['browser_download_url']
 
 
 def installable_releases():
@@ -5868,31 +6970,135 @@ def installable_releases():
     return sorted(found.values(), key=lambda item: version_tuple(item[0]), reverse=True)
 
 
-def install_update(target, wait_pid):
-    """--install-update TARGET PID, run by the downloaded version from its temporary folder:
-    waits for the old launcher to close, copies this version over TARGET (never the saves,
-    settings or mods) and starts it."""
-    target = Path(target)
-    kernel = ctypes.windll.kernel32
-    handle = kernel.OpenProcess(0x00100000, False, int(wait_pid))  # SYNCHRONIZE
-    if handle:
-        kernel.WaitForSingleObject(handle, 60000)
-        kernel.CloseHandle(handle)
-    ignore = shutil.ignore_patterns(*USER_FILES)
-    for _attempt in range(30):
+def update_installer(folder):
+    """The program that puts a downloaded version in place: a copy of this launcher in the update's folder, for every
+    version. Not the new version's own launcher: one built without bbport_update (an older release, or one from a
+    branch without it) copies itself over the installation file by file and never takes the update mutex, so this
+    launcher would wait for it in vain."""
+    internal = Path(getattr(sys, '_MEIPASS', PORT_DIR / '_internal'))  # the frozen Python beside Bloodborne.exe
+    own = folder / 'installer'
+    shutil.copytree(internal, own / internal.name)
+    shutil.copy2(sys.executable, own / 'Bloodborne.exe')
+    return own / 'Bloodborne.exe'
+
+
+def progress_window(heading, work, icon=None):
+    """Runs work(say) on a helper thread under a small window: the heading and the line say(text) sets. It cannot be
+    closed (that would stop a swap halfway), and a start during the work brings it to the front (updater.to_front).
+    Returns (what work returned, None) or (None, what it raised, whatever it was); where Tk cannot show the window
+    the work runs all the same, without it."""
+    outcome, lines, fronts = [], queue.Queue(), queue.Queue()
+
+    def run():
         try:
-            shutil.copytree(PORT_DIR, target, dirs_exist_ok=True, ignore=ignore)
-            break
-        except OSError:  # a file still in use: the old launcher is closing
-            time.sleep(1)
-    else:
-        ctypes.windll.user32.MessageBoxW(None, _(
-            'Could not install the update. Download it from the releases page.',
-            'Не удалось установить обновление. Скачайте его со страницы релизов.'), 'Bloodborne', 0x10)
+            outcome.append((work(lines.put), None))
+        except BaseException as failure:  # the window closes and the installer says it
+            outcome.append((None, failure))
+
+    def without_window():
+        run()
+        return outcome[0]
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+    except Exception:
+        return without_window()
+    try:
+        root.title('Bloodborne')
+        root.configure(bg=BG)
+        root.resizable(False, False)
+        root.protocol('WM_DELETE_WINDOW', lambda: None)
+        try:
+            root.iconbitmap(default=str(icon or PORT_DIR / 'launcher' / 'bloodborne.ico'))
+        except tk.TclError:
+            pass
+        tk.Label(root, text=heading, bg=BG, fg=GOLD, font=(theme.BODY_SEMI, 12)).pack(anchor='w', padx=28,
+                                                                                       pady=(22, 6))
+        line = tk.Label(root, text='', bg=BG, fg=MUTED, font=(theme.BODY, 10), width=52, anchor='w', justify='left',
+                        wraplength=440)
+        line.pack(anchor='w', padx=28, pady=(0, 24))
+        root.update_idletasks()
+        root.geometry(f'+{(root.winfo_screenwidth() - root.winfo_reqwidth()) // 2}'
+                      f'+{(root.winfo_screenheight() - root.winfo_reqheight()) // 3}')
+        root.lift()
+    except Exception:  # a window Tk cannot draw: the update goes on without it
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return without_window()
+    event = bring_to_front_on_request(lambda: fronts.put(True), updater.UPDATE_FRONT)  # noqa: F841 (kept open)
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+
+    def front():
+        root.deiconify()
+        root.lift()
+        root.attributes('-topmost', True)
+        root.after(500, lambda: root.attributes('-topmost', False))
+        root.focus_force()
+
+    def poll():
+        try:
+            while not lines.empty():
+                line.configure(text=lines.get_nowait())
+            while not fronts.empty():
+                fronts.get_nowait()
+                front()
+        except Exception:  # only the window shows less: the work goes on
+            pass
+        if outcome:
+            root.destroy()
+        else:
+            root.after(100, poll)
+    root.after(100, poll)
+    root.mainloop()
+    worker.join()
+    return outcome[0] if outcome else (None, None)
+
+
+def install_update(target, wait_pid):
+    """--install-update TARGET PID: run by a copy of the launcher in the update's folder in %TEMP% (BB_UPDATE_FROM
+    names the new files, BB_UPDATE_FILES what they must be; 1.9.6 and older start the new version itself, without
+    them). Holds the update mutex, waits in a small window for the old launcher and every program started from
+    TARGET, puts the new version in place by renaming (bbport_update.install), then starts TARGET's launcher: the new
+    one, or the old one again when the update was undone. What happened goes into that start's log
+    (BB_UPDATE_RESULT)."""
+    target = Path(target)
+    source = Path(os.environ.get('BB_UPDATE_FROM') or PORT_DIR)
+    version = os.environ.get('BB_UPDATE_VERSION') or VERSION_TEXT
+    listed = updater.read_listed(os.environ.get('BB_UPDATE_FILES'))
+    launcher = updater.open_process(wait_pid)  # before the mutex: the old launcher waits for it, so it is still there
+    if not updater.hold_mutex():
+        updater.to_front()  # the installer that runs already shows its window
+        return 1
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        pass
+    notes, failure = progress_window(_('Installing version {}…').format(version), lambda say: updater.install(
+        source, target, launcher, int(wait_pid), say, USER_FILES, listed=listed),
+        icon=source / 'launcher' / 'bloodborne.ico')
+    updater.release_mutex()  # the launcher started next clears what is left
+    lines = list(notes or [])
+    if isinstance(failure, updater.RollbackFailed):
+        # Not started: its files may be half swapped. The next start puts them right (bbport_update.finish).
+        updater.notice(_('Version {0} could not be installed, and the installed version could not be put back '
+                         'completely ({1}).\n\nDownload the port again from the releases page, which opens now. '
+                         'Saves, settings and mods are not affected.').format(version, failure), error=True)
         webbrowser.open(RELEASES_PAGE)
         return 1
-    subprocess.Popen([str(target / 'Bloodborne.exe')], cwd=str(target))
-    return 0
+    if failure:
+        reason = str(failure) or type(failure).__name__
+        lines.append(f'Update: version {version} was not installed, the installed version was kept ({reason})')
+        updater.notice(_('Version {0} could not be installed: {1}.\n\nThe installed version was kept and works as '
+                         'before.').format(version, reason), error=True)
+    else:
+        lines.append(f'Update: version {version} installed')
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith('BB_UPDATE_')}
+    env['BB_UPDATE_RESULT'] = '\n'.join(lines)
+    subprocess.Popen([str(target / 'Bloodborne.exe')], cwd=str(target), env=env)
+    return 1 if failure else 0
 
 
 class _ThisModule:
@@ -5908,10 +7114,48 @@ class _ThisModule:
 
 bbport_setup.bind(_ThisModule())
 bbport_news.bind(_ThisModule())
+bbport_seamless.bind(_ThisModule())
+bbport_signin.bind(_ThisModule())
 bbport_help.bind(_ThisModule())
 bbport_search.bind(_ThisModule())
 bbport_pad.bind(_ThisModule())
 bbport_tls.bind(_ThisModule())
+updater.bind(_ThisModule())
+
+
+def restore_benchmark_backup(user):
+    """The route benchmark of the 1.9.3 test builds left its own save in place of the player's when it did not
+    finish (closed launcher, crash): the player's comes back. The savedata in place used to be deleted first: a
+    file in use (a sync tool, an antivirus) left part of it there, and the player's could not come back. It is
+    renamed aside now (bbport_saves.BENCHMARK_SAVE: kept, never deleted) before the player's is renamed back, and
+    goes back itself when that fails. Either way the log of the next start says so."""
+    backup, live = user / 'savedata.benchmark-backup', user / 'savedata'
+    try:
+        if not backup.is_dir():
+            return
+    except OSError:  # a saves folder that cannot be reached now (a network drive): nothing to put back this start
+        return
+    aside, moved = None, False
+    try:
+        if live.exists():
+            aside = user / saves.BENCHMARK_SAVE
+            if aside.exists():
+                aside = user / f'{saves.BENCHMARK_SAVE} {time.strftime("%Y-%m-%d %H.%M.%S")}'
+            live.rename(aside)
+            moved = True
+        backup.rename(live)
+    except OSError as error:
+        line = (f'Saves: the saves from before an unfinished game test could not be put back ({error}); they stay '
+                f'in {backup}, the next start tries again')
+        if moved:  # the rename of the player's failed, so savedata is free again
+            try:
+                aside.rename(live)
+            except OSError as second:
+                line += f'; the saves that were in use could not go back either ({second}), they are in {aside}'
+        textfile.REPAIRS.append(line)
+        return
+    textfile.REPAIRS.append(f'Saves: the saves from before an unfinished game test are back in {live}'
+                            + (f"; the test's save is kept in {aside}" if aside is not None else ''))
 
 
 def main():
@@ -5929,17 +7173,14 @@ def main():
     saves.WORDS.update({key: _(text) for key, text in saves.REASONS.items()})  # backup file names
     if args[:1] == ['--install-update'] and len(args) == 3:
         sys.exit(install_update(args[1], args[2]))
-    # The route benchmark of the 1.9.3 test builds left its own save in place of the player's when it
-    # did not finish (closed launcher, crash): the player's comes back.
-    try:
-        user = Path(settings.get('user_dir') or DATA_DIR / 'user')
-        if (user / 'savedata.benchmark-backup').is_dir():
-            shutil.rmtree(user / 'savedata', ignore_errors=True)
-            (user / 'savedata.benchmark-backup').rename(user / 'savedata')
-    except OSError:
-        pass
-    if FROZEN and UPDATE_DIR not in PORT_DIR.parents:
-        shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind
+    # An update is being installed: its files are being swapped, and a launcher or a game started from them would
+    # hold them (the installer would wait for it, or undo the swap). The installer's window comes to the front and
+    # this start exits at once; without that window, a note that closes by itself. The launcher opens by itself.
+    if updater.underway():
+        if not updater.to_front():
+            updater.notice(_('An update is being installed. The launcher opens by itself when it is done.'), seconds=4)
+        sys.exit(0)
+    restore_benchmark_backup(Path(settings.get('user_dir') or DATA_DIR / 'user'))
     # Without a usable game folder there is nothing to play yet: open the launcher instead.
     page, failed, problem = 'play', None, None
     if '--play' in args and (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file() and CONFIG_FILE.exists():
@@ -5964,6 +7205,12 @@ def main():
         pass
     if not one_launcher():
         sys.exit(0)  # the open launcher comes to the front
+    # What finished or failed updates left behind, only now: before, a second start deleted the files an update was
+    # still copying from. clear_leftovers keeps them while an installer holds the update mutex, and finishes or
+    # undoes a swap that stopped halfway. It and the installer's outcome go into the next game's log.
+    if FROZEN:
+        textfile.REPAIRS.extend(updater.clear_leftovers(PORT_DIR, UPDATE_DIR) or [])
+    textfile.REPAIRS.extend(line for line in os.environ.pop('BB_UPDATE_RESULT', '').splitlines() if line.strip())
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
     root = tk.Tk()

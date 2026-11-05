@@ -246,41 +246,46 @@ bool NpHandler::ConnectUser(s32 user_id, const std::string& host, u16 port, cons
     LOG_INFO(NpHandler, "Connecting user_id={} npid='{}' to {}:{} (timeout {}s)", user_id, npid,
              host, port, ShadNet::SHAD_CONNECT_TIMEOUT_MS / 1000);
 
-    auto client = std::make_shared<ShadNet::ShadNetClient>();
+    // bbport: made again for a retry (an earlier session still open on the server, below).
+    const auto make_client = [this, user_id] {
+        auto client = std::make_shared<ShadNet::ShadNetClient>();
 
-    // Wire per-user notification callbacks
-    client->onFriendQuery = [this, user_id](const ShadNet::NotifyFriendQuery& n) {
-        OnFriendQuery(user_id, n);
-    };
-    client->onFriendNew = [this, user_id](const ShadNet::NotifyFriendNew& n) {
-        OnFriendNew(user_id, n);
-    };
-    client->onFriendLost = [this, user_id](const ShadNet::NotifyFriendLost& n) {
-        OnFriendLost(user_id, n);
-    };
-    client->onFriendStatus = [this, user_id](const ShadNet::NotifyFriendStatus& n) {
-        OnFriendStatus(user_id, n);
-    };
-    client->onWebApiPushEvent = [this, user_id](const ShadNet::NotifyWebApiPushEvent& n) {
-        OnWebApiPushEvent(user_id, n);
-    };
-    client->onServiceUnavailable = [this, user_id](const ShadNet::NotifyServiceUnavailable& n) {
-        OnServiceUnavailable(user_id, n);
-    };
-    client->onClientRejected = [this, user_id](const ShadNet::NotifyClientRejected& n) {
-        OnClientRejected(user_id, n);
-    };
-    client->onAsyncReply = [this, user_id](ShadNet::CommandType cmd, u64 pkt_id,
-                                           ShadNet::ErrorType err, const std::vector<u8>& body) {
-        OnAsyncReply(user_id, cmd, pkt_id, err, body);
-    };
-    client->onLoginResult = [this, user_id](const ShadNet::LoginResult& res) {
-        OnLoginResult(user_id, res);
-    };
+        // Wire per-user notification callbacks
+        client->onFriendQuery = [this, user_id](const ShadNet::NotifyFriendQuery& n) {
+            OnFriendQuery(user_id, n);
+        };
+        client->onFriendNew = [this, user_id](const ShadNet::NotifyFriendNew& n) {
+            OnFriendNew(user_id, n);
+        };
+        client->onFriendLost = [this, user_id](const ShadNet::NotifyFriendLost& n) {
+            OnFriendLost(user_id, n);
+        };
+        client->onFriendStatus = [this, user_id](const ShadNet::NotifyFriendStatus& n) {
+            OnFriendStatus(user_id, n);
+        };
+        client->onWebApiPushEvent = [this, user_id](const ShadNet::NotifyWebApiPushEvent& n) {
+            OnWebApiPushEvent(user_id, n);
+        };
+        client->onServiceUnavailable = [this, user_id](const ShadNet::NotifyServiceUnavailable& n) {
+            OnServiceUnavailable(user_id, n);
+        };
+        client->onClientRejected = [this, user_id](const ShadNet::NotifyClientRejected& n) {
+            OnClientRejected(user_id, n);
+        };
+        client->onAsyncReply = [this, user_id](ShadNet::CommandType cmd, u64 pkt_id,
+                                               ShadNet::ErrorType err, const std::vector<u8>& body) {
+            OnAsyncReply(user_id, cmd, pkt_id, err, body);
+        };
+        client->onLoginResult = [this, user_id](const ShadNet::LoginResult& res) {
+            OnLoginResult(user_id, res);
+        };
 
-    // Seed the current Appear-Offline preference so the login packet carries it (the send
-    // is suppressed pre-auth; it just caches on the client).
-    client->SetAppearOffline(m_appear_offline.load());
+        // Seed the current Appear-Offline preference so the login packet carries it (the send
+        // is suppressed pre-auth; it just caches on the client).
+        client->SetAppearOffline(m_appear_offline.load());
+        return client;
+    };
+    auto client = make_client();
     client->Start(host, port, npid, password, token);
 
     // Shared handling for an incompatible-protocol failure (version mismatch or
@@ -321,7 +326,24 @@ bool NpHandler::ConnectUser(s32 user_id, const std::string& host, u16 port, cons
         return false;
     }
 
-    const ShadNet::ShadNetState auth_state = client->WaitForAuthenticated();
+    ShadNet::ShadNetState auth_state = client->WaitForAuthenticated();
+    // bbport: the session of the game this one replaces (the in-game restart), or one whose
+    // connection died on the way, can still be open on the server; its login is then refused as
+    // already logged in. Asked again for a minute (the server closes such a session when it
+    // notices, at most 45 s on SuperMedo) before the game plays offline.
+    constexpr int AlreadyInRetries = 12;
+    for (int retry = 1; auth_state == ShadNet::ShadNetState::FailureAlreadyIn && retry <= AlreadyInRetries;
+         ++retry) {
+        LOG_WARNING(NpHandler, "user_id={} already signed in elsewhere; asking again in 5 s ({}/{})",
+                    user_id, retry, AlreadyInRetries);
+        client->Stop();
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        client = make_client();
+        client->Start(host, port, npid, password, token);
+        auth_state = client->WaitForConnection();
+        if (auth_state == ShadNet::ShadNetState::Ok)
+            auth_state = client->WaitForAuthenticated();
+    }
     if (auth_state != ShadNet::ShadNetState::Ok) {
         LOG_ERROR(NpHandler, "user_id={} authentication failed (state={})", user_id,
                   static_cast<int>(auth_state));
@@ -767,6 +789,7 @@ void NpHandler::ResolveOnlineId(
         std::lock_guard lock(m_mutex_pending_lookup);
         PendingLookupRequest pending;
         pending.user_id = user_id;
+        pending.online_id = online_id;
         pending.on_result = std::move(on_result);
         m_pending_lookup.emplace(pkt_id, std::move(pending));
     }
@@ -776,12 +799,14 @@ void NpHandler::ResolveOnlineId(
 void NpHandler::OnLookupReply(s32 user_id, ShadNet::CommandType /*cmd*/, u64 pkt_id,
                               ShadNet::ErrorType error, const std::vector<u8>& body) {
     std::function<void(s32, u64, const std::string&)> on_result;
+    std::string online_id;
     {
         std::lock_guard lock(m_mutex_pending_lookup);
         auto it = m_pending_lookup.find(pkt_id);
         if (it == m_pending_lookup.end()) {
             return; // no waiter (already flushed by a disconnect, or a stray reply)
         }
+        online_id = std::move(it->second.online_id);
         on_result = std::move(it->second.on_result);
         m_pending_lookup.erase(it);
     }
@@ -796,6 +821,13 @@ void NpHandler::OnLookupReply(s32 user_id, ShadNet::CommandType /*cmd*/, u64 pkt
     }
     if (error == ShadNet::ErrorType::InvalidInput) {
         on_result(ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT, 0, {});
+        return;
+    }
+    if (error == ShadNet::ErrorType::Invalid && !online_id.empty()) {
+        // bbport: SuperMedo's shadNet has no lookup (an unknown command: every lookup failed,
+        // 2026-11-01). An Online ID is its own NpId there, so it is answered from the ID itself,
+        // as BBSC's build of the port did (no account id).
+        on_result(ORBIS_OK, 0, online_id);
         return;
     }
     if (error != ShadNet::ErrorType::NoError) {

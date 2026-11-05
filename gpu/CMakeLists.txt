@@ -234,6 +234,16 @@ target_compile_definitions(bbnet PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT CPPHTTPLIB_Z
 # verification failed" (error 10) for The Hunter's Dream on some PCs.
 target_compile_definitions(bbnet PRIVATE CPPHTTPLIB_DISABLE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE)
 target_link_libraries(bbnet PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
+# The ISRG roots the port carries and Windows' check of the server's whole chain (windows_trust.h)
+add_executable(windows-trust-test EXCLUDE_FROM_ALL ../tests/test_windows_trust.cpp)
+target_include_directories(windows-trust-test PRIVATE bbnet/include third_party/httplib)
+target_compile_definitions(windows-trust-test PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT
+    CPPHTTPLIB_DISABLE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE)
+target_compile_options(windows-trust-test PRIVATE -UNDEBUG)
+target_link_libraries(windows-trust-test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+if (WIN32)
+    target_link_libraries(windows-trust-test PRIVATE crypt32 ws2_32)
+endif()
 if (WIN32)
     target_sources(bbnet PRIVATE third_party/wepoll/wepoll.c)
     target_include_directories(bbnet PRIVATE third_party/wepoll)
@@ -322,6 +332,14 @@ if (WIN32)
     target_link_libraries(fsr411-compare PRIVATE bbgpu atrac9 onecore bcrypt ws2_32 -pthread)
     target_include_directories(fsr411-compare PRIVATE ${SHADER_INCLUDE})
     add_dependencies(fsr411-compare host_shaders)
+    # The runtime's own tests (tests/test_runtime.py runs them; build.sh --test on Linux):
+    # ninja -C out/gpu runtime-test, then copy out/gpu/runtime-test.exe to out/.
+    add_executable(runtime-test EXCLUDE_FROM_ALL ../tests/test_runtime.c ${BB_RUNTIME} ../src/compat_win.c)
+    set_target_properties(runtime-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+    target_compile_options(runtime-test PRIVATE -UNDEBUG) # the checks are assert()s
+    target_include_directories(runtime-test PRIVATE .. ../src)
+    target_link_libraries(runtime-test PRIVATE bbgpu atrac9 onecore bcrypt ws2_32 -pthread)
+    target_link_options(runtime-test PRIVATE -Wl,--disable-high-entropy-va)
     add_executable(object-motion-cache-test EXCLUDE_FROM_ALL ../tests/test_object_motion_cache.cpp
         ${BB_RUNTIME} ../src/compat_win.c)
     target_include_directories(object-motion-cache-test PRIVATE .. ../src shim shadps4 third_party/gcn/include)

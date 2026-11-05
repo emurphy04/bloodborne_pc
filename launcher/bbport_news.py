@@ -29,7 +29,79 @@ def servers_notice():
              'in, or make a free account, on the Online page.')
 
 
+def hunters_dream_notice():
+    return _("The Hunter's Dream is no longer offered: the port plays on SuperMedo Server only. If you played there, "
+             'you now play on SuperMedo Server. Sign in, or make a free account, on the Online page.')
+
+
 NOTES = {
+    '1.9.8 beta 5': (
+        None,
+        [('Online', [
+            "Seamless co-op: BBSC's own direct channel between players works now. The port refused it, so warps, "
+            "world sync and the host's progress went the long way through the server's relay, late.",
+            'Seamless co-op settings on the Online page: the difficulty (how much stronger enemies and bosses get '
+            "for every guest) and BBSC's main options. The host's settings count for the whole session.",
+            "Seamless co-op's bells are given once you reach the Hunter's Dream, not at the very start.",
+            "Looking up another player by name no longer fails on SuperMedo's servers.",
+        ])]),
+    '1.9.8 beta 4': (
+        None,
+        [('Online', [
+            'Seamless co-op has its own characters again. Beta 3 played your normal ones, and Seamless co-op '
+            'swaps their bells for its own items: back in the normal game they showed as "?GoodsName?" and the '
+            'bells were gone. If that happened to you, put back a backup from before you played Seamless co-op '
+            '(Saves page).',
+            'The Saves page follows your choice: with Seamless co-op chosen it shows, backs up and restores '
+            "Seamless co-op's characters, and offers your normal characters to copy in.",
+            "Parties: a box beside the party code shows who is in your party, with each hunter's level and who "
+            'is online. It updates by itself.',
+            'Test connection no longer says the Seamless co-op game server is not reachable.',
+        ])]),
+    '1.9.8 beta 2': (
+        None,
+        [('Online', [
+            "SuperMedo Seamless co-op (beta): BBSC's seamless co-op on SuperMedo's own seamless server, with your "
+            'SuperMedo account. Choose it on the Online page; everyone in a session picks it.',
+            'Parties: make a party code on the Online page and send it to your friends. While you are in a party, '
+            "your summon signs and your Beckoning Bell find only your party's hunters, with no level limit.",
+            'Back online by itself after a dropped connection, within a minute.',
+        ]), ('Fixes', [
+            'Two rare freezes fixed (the game could hang for good while loading areas or adding new shaders).',
+        ])]),
+    '1.9.7': (
+        hunters_dream_notice,
+        [('Online', [
+            "The Hunter's Dream is no longer offered: SuperMedo Server is the port's server. Players who chose The "
+            "Hunter's Dream move to SuperMedo Server by themselves.",
+        ]), ('Fixes', [
+            'Updates install safely: the new version is put in place in one step and undone when Windows holds a '
+            'file, so an update can no longer leave a launcher that does not start ("Failed to start embedded '
+            'python interpreter").',
+            'Restart Game in PC Settings keeps you online: the game came back signed out before.',
+            'Graphics for your PC: no sharpening on top of FSR 4 (it left flaws along edges), and a new graphics '
+            'card gets its own upscaler (DLSS on a GeForce RTX). The frame rate you chose stays.',
+            'Saves and settings are written in one piece, so a crash or a full disk cannot cut them in half.',
+            'Starting from the desktop shortcut or Steam without an online account plays offline instead of '
+            'failing.',
+        ]), ('Checks before you play', [
+            'The launcher tells you when Windows sees a graphics card that Vulkan does not, when the game folder '
+            'is in OneDrive, when a driver is too old, when a runtime for AMD\'s FSR 4 is missing, and when the '
+            'firewall blocks the game.',
+            'A changed eboot.bin is swapped for a clean copy found on your PC, and Help can check every game file.',
+        ]), ('Launcher', [
+            'Achievements can be brought over from another installation.',
+            'Help asks on our forum now: Help & Support on forum.bbport.de. The Discord invite works again.',
+            'Search finds more of what players ask for, and the side bar fits small windows.',
+        ])]),
+    '1.9.6': (
+        None,
+        [('Fixes', [
+            'Online: "Failed to connect to Bloodborne server" at Play Online on some PCs is fixed. The port now '
+            "carries Let's Encrypt's root certificates itself, so it trusts SuperMedo Server and The Hunter's "
+            "Dream even before Windows has downloaded them, and Windows' own check gets the server's whole "
+            'certificate chain.',
+        ])]),
     '1.9.5': (
         servers_notice,
         [('Online', [
