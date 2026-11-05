@@ -60,6 +60,21 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(env['BB_DLC_DIR'], str(self.user / 'addcont' / 'CUSA03173'))
 
 
+class SavesFolderTests(unittest.TestCase):
+    """The launcher's Saves page and its backups use the saves the start plays (launcher.saves_user_dir)."""
+    def test_seamless_co_op_has_its_own(self):
+        user = Path('C:/port/user')
+        with unittest.mock.patch.object(launcher, 'BBSC_LAUNCH', Path(__file__)):  # BBSC is there
+            self.assertEqual(launcher.saves_user_dir({'user_dir': str(user), 'online': True, 'online_pool': 'seamless'}),
+                             user / run.COOP_SAVES)
+            for other in ({'online': False, 'online_pool': 'seamless'}, {'online': True, 'online_pool': 'supermedo'}):
+                self.assertEqual(launcher.saves_user_dir({'user_dir': str(user), **other}), user)
+        with unittest.mock.patch.object(launcher, 'BBSC_LAUNCH', Path('C:/nowhere/bbsc-launch.exe')):
+            self.assertEqual(launcher.saves_user_dir({'user_dir': str(user), 'online': True, 'online_pool': 'seamless'}),
+                             user)
+        self.assertEqual(launcher.saves.COOP_SAVES, run.COOP_SAVES)
+
+
 class ItsScriptTests(unittest.TestCase):
     """A launcher opened by BBSC's script keeps BBSC for a start on BBSC's server only."""
     def start(self, **settings):

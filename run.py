@@ -28,6 +28,18 @@ def prepare_driver_environment(env):
     return bbport_driver_runtime.configure_environment(env)
 
 
+# The Vulkan loader's variables that decide which graphics drivers it loads: one set in Windows' environment
+# variables hides every other card from the game (the launcher's Help: "The game does not use your graphics card").
+VULKAN_DRIVER_VARIABLES = ('VK_ICD_FILENAMES', 'VK_DRIVER_FILES', 'VK_ADD_DRIVER_FILES', 'VK_LOADER_DRIVERS_SELECT',
+                           'VK_LOADER_DRIVERS_DISABLE')
+
+
+def vulkan_driver_note(env):
+    """A line for the log when one of them is set, None without."""
+    found = [f'{name}={env[name]}' for name in VULKAN_DRIVER_VARIABLES if env.get(name)]
+    return f'Vulkan: the drivers it loads are limited by {"; ".join(found)}' if found else None
+
+
 # Co-op: the community service that answers Bloodborne's own game-server requests
 # (messages, bloodstains, sign-in); summon requests go to the shadNet server instead.
 COMMUNITY_SERVER = 'https://game.supermedo.com'
@@ -69,6 +81,7 @@ def online_overrides(env, user_dir):
         if '://' not in community:
             community = 'https://' + community
         scheme, host = community.split('://', 1)
+        host = host.split('/', 1)[0].rsplit(':', 1)[0] if re.search(r':\d+$', host) else host  # its API port below
         # The game's own server functions (messages, bloodstains, summon signs) go over HTTP to
         # the game server only, as bbhost and Awaken's port send them; never through a shadNet
         # WebAPI (Metr1k, The Hunter's Dream). Play logs go to its API port instead of
@@ -115,6 +128,81 @@ def hunters_dream(env, user_dir):
 # (seen on US CUSA00900): one of its edits inverts a branch in the menu code (+0xf6d90d) and the
 # gestures menu crashes the game. The port has its own 60 fps; the clean 1.09 eboot.bin is needed.
 LANCE_60FPS_IMAGE = 'bbc91f4dff6bc3118b039464289e39878a8fdfc802a07fab9d5fe84d935a676f'
+
+
+# The in-game trophy pop-up (gpu/shim/bbport_overlay.cpp) speaks the game's text language (BB_LANGUAGE
+# codes, launcher LANGUAGES): the trophy names' translations (launcher/bbport_lang_trophies.py) and its heading.
+TROPHY_LANGUAGES = {'1': 'en', '8': 'ru', '0': 'ja', '2': 'fr', '3': 'es', '4': 'de', '5': 'it', '9': 'ko',
+                    '10': 'zh', '11': 'zh', '17': 'pt'}
+TROPHY_HEADINGS = {'1': 'Trophy earned', '8': 'Получен приз', '0': 'トロフィーを獲得しました',
+                   '2': 'Trophée obtenu', '3': 'Trofeo obtenido', '4': 'Trophäe erhalten', '5': 'Trofeo ottenuto',
+                   '9': '트로피를 획득했습니다', '10': '獲得獎盃', '11': '获得奖杯', '17': 'Troféu conquistado'}
+
+
+def write_trophy_text(path, language):
+    """The pop-up's texts, read through BB_TROPHY_TEXT: "lang", "heading" and one "id grade name
+    description" line per trophy, tab-separated (the translations' line breaks joined)."""
+    sys.path.insert(0, str(PORT / 'launcher'))
+    import bbport_trophies
+    from bbport_lang_trophies import TRANSLATIONS
+    language = str(language or '1')
+    code = TROPHY_LANGUAGES.get(language, 'en')
+    words = TRANSLATIONS.get(code, {})
+    joiner = '' if code in ('zh', 'ja') else ' '
+
+    def text(english):
+        lines = words.get(english, english).replace('\t', ' ').splitlines()
+        return joiner.join(part.strip() for part in lines if part.strip())
+
+    rows = [f'lang\t{code}', f'heading\t{TROPHY_HEADINGS.get(language, TROPHY_HEADINGS["1"])}']
+    rows += [f'{trophy}\t{grade[0]}\t{text(name)}\t{text(description)}'
+             for trophy, name, description, grade, _ in bbport_trophies.TROPHIES]
+    Path(path).write_text('\n'.join(rows) + '\n', encoding='utf-8')
+    return Path(path)
+
+
+# The pop-up's pictures: the game's own trophy icons, the ones the launcher's trophy page shows, as raw
+# TROPHY_ICON_SIZE x TROPHY_ICON_SIZE RGBA (the overlay has no PNG decoder).
+TROPHY_ICON_SIZE = 128
+
+
+def write_trophy_icons(folder, game):
+    """<folder>/<id>.rgba for each trophy whose PNG the player's sce_sys/trophy/trophy00.trp holds, read
+    through BB_TROPHY_ICONS; a trophy without one keeps the pop-up's cup. Done again only when the
+    trophy file changed (source.txt). Nothing of the game is shipped: the pictures come from its copy."""
+    sys.path.insert(0, str(PORT / 'launcher'))
+    import bbport_trophies
+    from bbport_trophy_icons import TrophyIcons
+    from PIL import Image
+    folder = Path(folder)
+    source = Path(game) / 'sce_sys' / 'trophy' / 'trophy00.trp'
+    stat = source.stat()
+    stamp = f'{stat.st_size} {stat.st_mtime_ns} {TROPHY_ICON_SIZE}'
+    ids = [trophy for trophy, *_ in bbport_trophies.TROPHIES]
+    done = folder / 'source.txt'  # the stamp, then the ids written
+    try:
+        lines = done.read_text(encoding='utf-8').splitlines()
+        if (len(lines) == 2 and lines[0] == stamp
+                and all((folder / f'{trophy}.rgba').is_file() for trophy in lines[1].split())):
+            return folder
+    except OSError:
+        pass
+    folder.mkdir(parents=True, exist_ok=True)
+    icons = TrophyIcons(game)
+    written = []
+    for trophy in ids:
+        target = folder / f'{trophy}.rgba'
+        png = icons.get(trophy)
+        if not png:
+            target.unlink(missing_ok=True)
+            continue
+        with Image.open(io.BytesIO(png)) as image:
+            pixels = image.convert('RGBA').resize((TROPHY_ICON_SIZE, TROPHY_ICON_SIZE), Image.LANCZOS).tobytes()
+        target.write_bytes(pixels)
+        written.append(str(trophy))
+    done.write_text(f'{stamp}\n{" ".join(written)}\n', encoding='utf-8')
+    print(f'Trophy pictures for the pop-up: {len(written)} of {len(ids)} from {source.name}')
+    return folder
 
 
 def eboot_image(game):
@@ -323,6 +411,17 @@ def refresh_shared_graphics(env, config):
             env.pop('BB_FPS_LIMIT', None)
 
 
+def frame_pacing(env, fps):
+    """The vblank rate for the frame rate mode (BB_VBLANK_HZ: 0 is the unlocked mode's 480 Hz with a frame limit
+    at the display refresh), chosen here at every start. The in-game restart inherits the previous start's
+    environment, and a value kept from it held a frame rate changed in the game's menu at the old pacing: 30 FPS
+    after Unlocked kept the 480 Hz vblank and the frame limit at the display refresh, Unlocked after 30 kept 60 Hz
+    (R88). An explicit one (set before the first start, for measurements) is used as given."""
+    if env.get('BB_AUTO_VBLANK') == '1' or not env.get('BB_VBLANK_HZ'):
+        env['BB_VBLANK_HZ'] = {'uncap': '0', '90': '90'}.get(fps, '60')
+        env['BB_AUTO_VBLANK'] = '1'
+
+
 def find_executable(name):
     """bin/ (packaged), else out/ (built with build.sh)."""
     for candidate in (PORT / 'bin' / name, PORT / 'out' / name):
@@ -411,7 +510,10 @@ SAVE_BACKUPS_KEPT = 10
 
 
 # Seamless co-op's own saves: <user>/seamless-coop is the game's user folder while BBSC plays
-# (its saves, its rebirth targets), so co-op never writes the player's normal characters.
+# (its saves, its rebirth targets), so co-op never writes the player's normal characters: BBSC swaps the
+# game's bells for its own items in the character it plays, which the game without BBSC cannot name
+# ("?GoodsName?"), and takes the bells out (1.9.8 beta 3 played the normal saves and showed it). The
+# launcher's Saves page follows the chosen mode (bbport_setup.save_user_dir).
 COOP_SAVES = 'seamless-coop'
 
 
@@ -443,20 +545,27 @@ def coop_user_dir(env, user_dir, game):
 def backup_saves(user_dir, keep=SAVE_BACKUPS_KEPT, now=None):
     """BB_SAVE_BACKUPS=1 (launcher: Play page, "Back up saves at start"): a copy of the saves
     in <user>/save-backups/<time>/savedata before the game starts, the newest `keep` kept.
-    A failed copy is reported and the game starts anyway. Returns the copy, or None."""
+    A failed copy is reported, its part removed, and the game starts anyway. Returns the copy, or None."""
     saves = Path(user_dir) / 'savedata'
     if not saves.is_dir() or not any(saves.rglob('userdata*')):
         return None
     root = Path(user_dir) / 'save-backups'
     target = root / time.strftime('%Y%m%d-%H%M%S', time.localtime(now)) / 'savedata'
+    made = not target.parent.exists()
     try:
         if not target.exists():
             shutil.copytree(saves, target)
+    except OSError as error:
+        # A copy cut off (a full drive, a file held) counted among the kept ones and pushed a whole one out.
+        if made:
+            shutil.rmtree(target.parent, ignore_errors=True)
+        print(f'Save backup: {error}; the game starts without one')
+        return None
+    try:
         for old in sorted(p for p in root.iterdir() if p.is_dir())[:-keep]:
             shutil.rmtree(old, ignore_errors=True)
     except OSError as error:
-        print(f'Save backup: {error}; the game starts without one')
-        return None
+        print(f'Save backup: the oldest copies stay ({error})')
     print(f'Save backup: {target.parent}')
     return target
 
@@ -551,6 +660,9 @@ def main():
     if note:
         print(note)
     prepare_driver_environment(env)
+    note = vulkan_driver_note(env)
+    if note:
+        print(note)
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
     out.mkdir(parents=True, exist_ok=True)
@@ -590,10 +702,22 @@ def main():
         fail(f'The game folder {game} has no {" / ".join(missing)}: the game was not unpacked completely. '
              'Unpack the base game into a new, empty folder again and copy the 1.09 update over it.')
     if env.get('BB_SKIP_GAME_CHECK') != '1':
+        from clean_eboot import CLEAN_IMAGE, note as eboot_note, restore as restore_eboot
         try:
-            prepatched = image_sha256(game) == LANCE_60FPS_IMAGE
+            digest = image_sha256(game)
         except (OSError, ValueError, KeyError, IndexError):
-            prepatched = False  # prepare.py reports unreadable executables itself
+            digest = None  # prepare.py reports unreadable executables itself
+        # Not the clean 1.09 eboot.bin (a 60 fps one, a patched one, one cut off): the clean one comes back when it
+        # is still on this PC (clean_eboot.py), the other one is kept beside it.
+        if digest != CLEAN_IMAGE:
+            try:
+                restored = restore_eboot(game)
+            except Exception:  # a repair: never in the way of a start
+                restored = None
+            if restored:
+                print(eboot_note(restored))
+                digest = CLEAN_IMAGE
+        prepatched = digest == LANCE_60FPS_IMAGE
         if prepatched:
             fail("This eboot.bin has Lance McDonald's 60 fps patch applied to it, which crashes the "
                  'game when the gestures menu opens (the port has its own 60 fps): copy eboot.bin '
@@ -794,13 +918,20 @@ def main():
         if lang in ('10', '11'):
             if 'Unlock Game Region' not in extra:
                 extra = ';'.join(filter(None, (extra, 'Unlock Game Region')))
+        try:
+            env['BB_TROPHY_TEXT'] = str(write_trophy_text(out / 'trophies.tsv', lang))
+        except Exception as error:  # the pop-up then says "Trophy <id>"
+            print(f'Trophy names for the pop-up: {error}')
+        try:
+            env['BB_TROPHY_ICONS'] = str(write_trophy_icons(out / 'trophy_icons', original_game))
+        except Exception as error:  # the pop-up then shows the cup in the grade's colour
+            print(f'Trophy pictures for the pop-up: {error}')
         run_script('patches.py', '--out', out, '--fps', fps, '--extra', extra,
                    '--settings', config, '--game-dir', game, '--render-res', env.get('BB_RENDER_RES', ''),
                    '--output-res', env.get('BB_OUTPUT_RES', ''),
                    '--patches-dir', env.get('BB_PATCHES_DIR', data / 'patches'),
                    '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'))
-        if not env.get('BB_VBLANK_HZ'):
-            env['BB_VBLANK_HZ'] = {'uncap': '0', '90': '90'}.get(fps, '60')
+        frame_pacing(env, fps)
 
         # The in-game restart starts this script again once this process is gone.
         # GPU caches (shaders, pipelines) beside the saves; read before main(), so set here.
