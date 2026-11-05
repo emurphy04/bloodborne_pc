@@ -22,7 +22,7 @@ exit /b
 # ------------------------------------------------------------------------------------------
 $ErrorActionPreference = 'SilentlyContinue'
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
-$ToolVersion = '1.7.8'
+$ToolVersion = '1.7.9'
 Add-Type -AssemblyName System.Windows.Forms
 
 $secrets = New-Object System.Collections.ArrayList
@@ -33,6 +33,9 @@ function Hide-Private([string]$text) {
     # libraries log. Crash addresses and registers stay as they are.
     $text = [regex]::Replace($text, "(The Hunter's Dream as )[^,\r\n]+", '$1<hidden>')
     $text = [regex]::Replace($text, "(?i)\b((?:npid|owner|handle\.data)=|Login packet sent for |online id set to )'[^'\r\n]*'", '$1''<hidden>''')
+    $text = [regex]::Replace($text, "(?i)\b((?:onlineId|handle)=)'[^'\r\n]*'", '$1''<hidden>''')
+    # A secret typed into the launcher's extra variables (BB_SHADNET_PASSWORD=...).
+    $text = [regex]::Replace($text, '(?i)\b((?:BB|BBSC)_\w*(?:PASS|TOKEN|SECRET|KEY|NPID|AUTH)\w*\s*=\s*)("[^"]*"|[^\s,;]+)', '$1<hidden>')
     $text = [regex]::Replace($text, '(?i)\b(accountId|account_id)=(0x)?[0-9a-f]+', '$1=<hidden>')
     $text = [regex]::Replace($text, '(?i)\b(account id )\d+', '$1<hidden>')
     $text = [regex]::Replace($text, '(?i)\b(addr|peerAddr|localAddr|mappedAddr|server_addr)=0x[0-9a-f]+', '$1=<hidden>')
@@ -49,7 +52,7 @@ function Val($value) { if ("$value" -ne '') { "$value" } else { 'default' } }
 
 Write-Host ''
 Write-Host "  BB Report Tool $ToolVersion - Bloodborne PC Port" -ForegroundColor Yellow
-Write-Host '  Collecting info for your #help post. Nothing is sent anywhere.'
+Write-Host '  Collecting info for your post in Help & Support on forum.bbport.de. Nothing is sent anywhere.'
 Write-Host ''
 
 # --- Port folder --------------------------------------------------------------------------
@@ -145,7 +148,10 @@ $settings = $null
 $settingsFile = if ($env:BBTOOL_SETTINGS) { $env:BBTOOL_SETTINGS } else { Join-Path $env:APPDATA 'bbport-launcher\settings.json' }
 if (Test-Path $settingsFile) { $settings = Get-Content $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json }
 if ($settings) {
-    foreach ($key in 'online_npid', 'online_password', 'player_name') {
+    # Every account the launcher keeps: the SuperMedo and The Hunter's Dream ones as well (only the shadNet
+    # boxes' were here; the game logs the player's own Online ID).
+    foreach ($key in 'online_npid', 'online_password', 'player_name', 'supermedo_npid', 'supermedo_pass',
+                     'thd_online_id', 'thd_token', 'party_key') {
         if ($settings.$key) { [void]$secrets.Add([string]$settings.$key) }
     }
 }
@@ -205,6 +211,9 @@ if (-not $portVersion) {
     $portVersion = Read-Host '  Port version (bottom left in the launcher, e.g. 1.7.2). Type it and press Enter'
 }
 if (-not $portVersion) { $portVersion = 'not given' }
+# The number alone for comparisons: a beta's "1.9.8 beta 5" made every [version] cast throw, so betas were told to
+# update to 1.7.7 and the sign-in hints never came (2026-11-02).
+$portNumber = if ($portVersion -match '^(\d+(?:\.\d+){1,3})') { $Matches[1] } else { $portVersion }
 
 # --- Game dump: title ID and game version from sce_sys\param.sfo ---------------------------
 function Read-Sfo([string]$path) {
@@ -478,11 +487,11 @@ function Hint([string]$text, [int]$rank = 3) { [void]$hints.Add([pscustomobject]
 if ($logOtherPort) { Hint "last_run.log was written by another port folder ($(Hide-Private $logOtherPort)), which shares this one's saves folder: start the game from this launcher once, then make the report again." 2 }
 function LogHas([string]$pattern) { [bool]($logText -and $logText -match $pattern) }
 $newest = '1.9.1'  # newest port version; BB Helper fills in the current one when it hands out the tool
-try { if ($portVersion -match '^\d' -and [version]$portVersion -lt [version]$newest) {
+try { if ($portVersion -match '^\d' -and [version]$portNumber -lt [version]$newest) {
     Hint "Port $portVersion is older than ${newest}: update first (launcher > Update, bottom left) - newer versions fix many crashes and online problems." 1 } } catch { }
 # Fixed in 1.7.3: SRT walker crash, WinError 32 at PLAY, online SSL check (release notes windows-v1.7.3).
 $before173 = $false
-try { $before173 = $portVersion -match '^\d' -and [version]$portVersion -lt [version]'1.7.3' } catch { }
+try { $before173 = $portVersion -match '^\d' -and [version]$portNumber -lt [version]'1.7.3' } catch { }
 $gpuName = "$($gameGpu.Name)"
 $amd = $gpuName -match 'AMD|Radeon'
 $upscaler = "$($ini['upscaler'])"
@@ -543,7 +552,7 @@ if (LogHas 'Device lost') {
     Hint $text 1
 }
 $beforePm4Fix = $true  # 1.7.7 fixed the 'Unimplemented PM4' crash; newer ports don't need the workaround
-try { $beforePm4Fix = [version]$portVersion -lt [version]'1.7.7' } catch { }
+try { $beforePm4Fix = [version]$portNumber -lt [version]'1.7.7' } catch { }
 if ((LogHas 'Unimplemented PM4') -and $beforePm4Fix) {
     Hint "Log: 'Unimplemented PM4' (crash right after a save loads): update to 1.7.7 or newer, it fixes this. Until then: Advanced > Two-stage GPU pipeline Off and Extra variables BB_COPY_GPU_BUFFERS=1." 1 }
 elseif (LogHas 'Unimplemented') {
@@ -570,7 +579,7 @@ if (LogHas 'shaderBinarySize \d+ is not equal to Program size') {
 if ($portOk -and (Test-Path (Join-Path $port 'scripts'))) {
     # Since 1.7 every start runs these scripts; one missing = an incomplete or mixed install.
     $missingScripts = @()
-    try { if ($portVersion -match '^\d' -and [version]$portVersion -ge [version]'1.7') {
+    try { if ($portVersion -match '^\d' -and [version]$portNumber -ge [version]'1.7') {
         $missingScripts = @('prepare.py', 'link_libc.py', 'link_modules.py', 'mods.py', 'patches.py', 'content_profile.py', 'cpu_compat.py') |
             Where-Object { -not (Test-Path (Join-Path $port "scripts\$_")) } } } catch { }
     if ($missingScripts) {
@@ -582,7 +591,7 @@ if ($clientRejected) {
 if (-not $clientRejected -and $logText -and $logText -match 'Login rejected error code (\d+)') {
     $code = $Matches[1]
     $current = $false
-    try { $current = $portVersion -match '^\d' -and [version]$portVersion -ge [version]'1.7.1' } catch { }
+    try { $current = $portVersion -match '^\d' -and [version]$portNumber -ge [version]'1.7.1' } catch { }
     $what = switch ($code) {
         '5' { if ($current) { "the shadNet server refused the login. Since 14 Oct 2026 it refuses the port in general, whatever the account: play online through The Hunter's Dream (Online co-op > Co-op pool: The Hunter's Dream > Sign in with Discord)" }
               else { "update the port (older versions are signed out by shadNet), and play online through The Hunter's Dream: the shadNet server currently refuses the port anyway" } }
@@ -591,6 +600,24 @@ if (-not $clientRejected -and $logText -and $logText -match 'Login rejected erro
         '8' { 'wrong password: enter it again under Online co-op' }
         default { 'check the account under Online co-op' } }
     Hint "Online login error code ${code}: $what." 1 }
+# Online on, but the launcher has no account for the chosen server (since 1.9.5: SuperMedo Server's own account, or
+# The Hunter's Dream's Discord sign-in). The game is then signed out and says it can't connect to the Bloodborne
+# network; in the log its online check (sceNpPollAsync) is never followed by the sign-in (NpAuth). 30.10.2026.
+$pool195 = $false
+try { $pool195 = $portVersion -match '^\d' -and [version]$portNumber -ge [version]'1.9.5' } catch { }
+if ((Setting 'online') -eq $true -and $pool195) {
+    $huntersDream = "$(Setting 'online_pool')" -eq 'huntersdream'
+    $signedIn = if ($huntersDream) { [bool]"$(Setting 'thd_token')" } else { "$(Setting 'supermedo_npid')" -and "$(Setting 'supermedo_pass')" }
+    if (-not $signedIn) {
+        $server = if ($huntersDream) { "The Hunter's Dream" } else { 'SuperMedo Server' }
+        $seen = if ((LogHas 'sceNpPollAsync') -and -not (LogHas 'GetAuthorizationCode')) { ' The log shows it: the game never signed in.' } else { '' }
+        Hint "Online is on, but the launcher is not signed in to ${server}, so the game can't play online: it says it can't connect to the Bloodborne network (1.9.7 and newer start it offline instead).$seen On the launcher's Online play page sign in (Sign in with Discord, or New SuperMedo account), then start the game again." 1 }
+}
+# The server closing the co-op connection (SuperMedo Server, 29.10.2026): the port reconnects at once, but a summon
+# in between fails.
+$drops = if ($logText) { ([regex]::Matches($logText, 'Reader header recv failed')).Count } else { 0 }
+if ($drops -ge 3) {
+    Hint "Online: the server closed the co-op connection $drops times during this game (the port reconnected each time). Summons that fail now and then come from that: it is on the server's side, not this PC - nothing to change here." 2 }
 $onlineServer = "$(Setting 'online_server')".Trim()
 if ((Setting 'online') -eq $true -and "$(Setting 'online_pool')" -ne 'huntersdream' -and $onlineServer -match '^(127\.0\.0\.1|localhost)(:|$)') {
     Hint "Online co-op: the shadNet server is set to $onlineServer - that's the local address of bbbridge (The Hunter's Dream), not shadNet. On the Online co-op page set Server address to srv.shadps4.net:31313 (or empty it) and empty WebAPI address." 2 }
@@ -766,6 +793,6 @@ if ($logNote -like 'log is from a later start*') {
     Write-Host '  The crash info from Windows is in the report. Best: make it crash again, then run this tool right away.' -ForegroundColor Yellow
 }
 Write-Host '  Done!' -ForegroundColor Green
-Write-Host '  1. The summary is in your clipboard: paste it into your #help post (Ctrl+V).'
+Write-Host '  1. The summary is in your clipboard: paste it into a new topic in Help & Support on forum.bbport.de (Ctrl+V).'
 Write-Host "  2. Attach this file to the post: $zip"
 if (-not $env:BBTOOL_OUT) { Start-Process explorer.exe "/select,`"$zip`"" }

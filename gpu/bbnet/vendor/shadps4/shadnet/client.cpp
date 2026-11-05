@@ -236,7 +236,9 @@ void ShadNetClient::ReaderThread() {
     while (!m_terminate) {
         u8 hdr[SHAD_HEADER_SIZE];
         if (!RecvN(hdr, SHAD_HEADER_SIZE)) {
-            if (!m_terminate)
+            // bbport: a refused login closes the socket on this thread (HandleLoginReply); that
+            // read failing is no lost connection (error 10038 in reports).
+            if (!m_terminate && m_sock != SHAD_INVALID_SOCK)
                 LOG_WARNING(ShadNet, "Reader header recv failed (recv {}, error {}), disconnecting",
                             m_last_recv_result, m_last_recv_error);
             break;
@@ -317,6 +319,11 @@ bool ShadNetClient::DoConnect() {
         m_state = ShadNetState::FailureConnect;
         return false;
     }
+#ifdef _WIN32
+    // bbport: never inherited by a process this one starts (the in-game restart): a copy there kept
+    // the session open after this process ended, and the server refused the next login.
+    ::SetHandleInformation(reinterpret_cast<HANDLE>(m_sock), HANDLE_FLAG_INHERIT, 0);
+#endif
 
     // Use non-blocking connect + select() so we time out instead of hanging
     // for the OS default TCP timeout (75 s on Linux, >20 s on Windows).

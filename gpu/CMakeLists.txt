@@ -234,6 +234,16 @@ target_compile_definitions(bbnet PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT CPPHTTPLIB_Z
 # verification failed" (error 10) for The Hunter's Dream on some PCs.
 target_compile_definitions(bbnet PRIVATE CPPHTTPLIB_DISABLE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE)
 target_link_libraries(bbnet PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
+# The ISRG roots the port carries and Windows' check of the server's whole chain (windows_trust.h)
+add_executable(windows-trust-test EXCLUDE_FROM_ALL ../tests/test_windows_trust.cpp)
+target_include_directories(windows-trust-test PRIVATE bbnet/include third_party/httplib)
+target_compile_definitions(windows-trust-test PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT
+    CPPHTTPLIB_DISABLE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE)
+target_compile_options(windows-trust-test PRIVATE -UNDEBUG)
+target_link_libraries(windows-trust-test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+if (WIN32)
+    target_link_libraries(windows-trust-test PRIVATE crypt32 ws2_32)
+endif()
 if (WIN32)
     target_sources(bbnet PRIVATE third_party/wepoll/wepoll.c)
     target_include_directories(bbnet PRIVATE third_party/wepoll)
@@ -431,6 +441,15 @@ target_compile_options(pad-use-test PRIVATE -UNDEBUG)
 add_executable(vram-warning-test EXCLUDE_FROM_ALL ../tests/test_vram_warning.cpp)
 target_include_directories(vram-warning-test PRIVATE shim)
 target_compile_options(vram-warning-test PRIVATE -UNDEBUG)
+
+# bbport: one file read from two threads, pread next to seek + read: ninja -C out/gpu
+# file-positions-test, then run it in the source tree (it writes under out/). No GPU, no game.
+if (WIN32)
+    add_executable(file-positions-test EXCLUDE_FROM_ALL ../tests/test_file_positions.c ../src/compat_win.c)
+    target_include_directories(file-positions-test PRIVATE ../src)
+    target_compile_options(file-positions-test PRIVATE -UNDEBUG)
+    target_link_libraries(file-positions-test PRIVATE bcrypt -pthread)
+endif()
 
 # bbport: keyboard and mouse button prompt icons: ninja -C out/gpu prompt-icons-test, then run it
 # (with a folder argument it writes each icon drawn and encoded, for viewing).
