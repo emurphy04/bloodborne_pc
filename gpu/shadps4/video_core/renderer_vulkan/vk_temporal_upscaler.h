@@ -37,6 +37,7 @@ class Scheduler;
 class Runtime;
 class CameraMotion;
 class SceneTargets;
+class FrameGenerator;
 
 class TemporalUpscaler {
 public:
@@ -47,6 +48,12 @@ public:
 
     [[nodiscard]] bool Enabled() const noexcept {
         return enabled;
+    }
+
+    /// bbport: frame generation (the Presenter's): its depth and motion vectors are taken at
+    /// the upscaler's trigger, the picture before the UI at the frame's first UI draw.
+    void SetFrameGenerator(FrameGenerator* generator) noexcept {
+        frame_generator = generator;
     }
 
     /// A draw into a full-size RGBA16F target with the scene depth: the scene color.
@@ -139,6 +146,12 @@ private:
     u64 view_uses = 0;
 
     void Run();
+    /// The scene depth and the motion vectors for frame generation (also with the upscaler off).
+    void CaptureFrameGen();
+    /// The UI target before the first UI draw (frame generation's picture without UI):
+    /// `color` (a texture cache image) at 1080p, the port's output-size UI image otherwise.
+    void CaptureHudless(VideoCore::ImageId color);
+    void CaptureHudlessUi();
     void RunScaled();
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
@@ -171,13 +184,18 @@ private:
     bool RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
                     const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh, float frame_ms,
                     bool hdr);
-    /// Records FSR 4 into output_image; on a permanent failure FSR 3 takes over.
-    bool RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image color, Fsr4Upscaler::Image depth,
-                    u32 w, u32 h, u32 ow, u32 oh, float frame_ms);
+    /// Records FSR 4 and returns its actual output when requested; FSR 3 takes over on failure.
+    bool RecordFsr4(vk::CommandBuffer &cmdbuf, Fsr4Upscaler::Image color, Fsr4Upscaler::Image depth,
+                    u32 w, u32 h, u32 ow, u32 oh, float frame_ms, bool hdr = true,
+                    Fsr4Upscaler::Image *produced = nullptr);
     void RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth);
+    /// Host RCAS for the Windows FSR 4.1.1 providers: read FP16 directly into a separate FP16 image.
+    /// Returns false when the existing sharpening path applies. Called from scaled SDR composition.
+    bool DirectSharpen(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image& produced);
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
     /// (output_image, or the 8-bit UI image with ldr) in General layout after the upscaler.
-    void ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w, u32 h);
+    void ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w, u32 h,
+                      vk::ImageView supplied_view = {});
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -187,12 +205,16 @@ private:
     SceneTargets& scene_targets;
     int applied_preset = -1;
     int applied_upscaler = -1;
+    int applied_fsr_backend = -1;
     bool dispatched_last_frame = false;
     bool last_active = false, last_jitter = false;
 
 
     bool enabled = false;
     bool failed = false;
+    FrameGenerator* frame_generator = nullptr;
+    bool frame_gen_captured = false; ///< this frame's depth and motion are taken
+    bool hudless_pending = false;    ///< the UI started; its picture is taken at its next draw
     u64 trigger_hash = 0x9a9cf8a9;
     VideoCore::ImageId scene_color{};
     bool done_this_frame = false;
@@ -277,6 +299,10 @@ private:
     vk::UniquePipelineLayout taa_sharpen_pipeline_layout;
     vk::UniquePipeline taa_sharpen_pipeline;
     vk::UniquePipeline taa_sharpen_ldr_pipeline;
+    vk::UniquePipeline taa_sharpen_direct_pipeline;
+    VideoCore::UniqueImage direct_sharpen_image;
+    vk::UniqueImageView direct_sharpen_view;
+    u32 direct_sharpen_width = 0, direct_sharpen_height = 0;
     // ExtraSharpen: a copy of the upscaled frame (RCAS reads neighbours) and the target views.
     VideoCore::UniqueImage extra_sharpen_image;
     vk::UniqueImageView extra_sharpen_view;

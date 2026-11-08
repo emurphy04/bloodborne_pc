@@ -32,7 +32,9 @@ public:
     bool AcquireNextImage();
 
     /// Presents the current image and move to the next one
-    bool Present();
+    /// bbport: present_id (VK_KHR_present_id, 0 for none) names a game frame for the latency
+    /// markers (vk_low_latency.h).
+    bool Present(vk::Queue queue = {}, u64 present_id = 0);
 
     vk::SurfaceKHR GetSurface() const {
         return surface;
@@ -90,6 +92,12 @@ public:
 
     bool GetHDR() const {
         return needs_hdr;
+    }
+
+    /// bbport: FIFO (V-Sync) waits for the display: frame generation caps the game for it.
+    bool WaitsForDisplay() const {
+        return present_mode == vk::PresentModeKHR::eFifo ||
+               present_mode == vk::PresentModeKHR::eFifoRelaxed;
     }
 
 private:

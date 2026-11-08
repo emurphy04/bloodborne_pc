@@ -161,6 +161,46 @@ const char *input_output_name(InputOutput out) {
     return "?";
 }
 
+/* The input.ini name of one keyboard or mouse input, or NULL for anything else. */
+static const char *KeyboardInputName(InputKind kind, int32_t value) {
+    if (kind == IN_KEY) {
+        for (size_t i = 0; i < sizeof(kKeyNames)/sizeof(*kKeyNames); ++i)
+            if ((int32_t)SDL_GetScancodeFromKey((SDL_Keycode)kKeyNames[i].value, NULL) == value) return kKeyNames[i].name;
+        return NULL;
+    }
+    const NameValue *table = kind == IN_MOUSE_BUTTON ? kMouseButtonNames : kind == IN_MOUSE_WHEEL ? kMouseWheelNames : NULL;
+    size_t count = kind == IN_MOUSE_BUTTON ? sizeof(kMouseButtonNames)/sizeof(*kMouseButtonNames)
+                                           : sizeof(kMouseWheelNames)/sizeof(*kMouseWheelNames);
+    for (size_t i = 0; table && i < count; ++i)
+        if (table[i].value == value) return table[i].name;
+    return NULL;
+}
+
+int input_binding_keyboard_text(const InputBinding *b, char *out, size_t size) {
+    const char *names[INPUT_MAX_COMBO];
+    if (!(names[0] = KeyboardInputName(b->kind, b->value))) return 0;
+    for (uint8_t i = 0; i < b->extra_count; ++i)
+        if (!(names[i + 1] = KeyboardInputName(b->extra[i].kind, b->extra[i].value))) return 0;
+    size_t used = 0;
+    for (int i = 0; i <= b->extra_count; ++i) {
+        int n = snprintf(out + used, size - used, "%s%s", i ? "+" : "", names[i]);
+        if (n < 0 || (size_t)n >= size - used) return 0;
+        used += (size_t)n;
+    }
+    return 1;
+}
+
+const char *input_binding_controller_name(const InputBinding *b) {
+    if (b->extra_count) return NULL;
+    if (b->kind == IN_CBUTTON) {
+        for (size_t i = 0; i < sizeof(kCButtonNames) / sizeof(kCButtonNames[0]); ++i)
+            if (kCButtonNames[i].value == b->value) return kCButtonNames[i].name;
+    }
+    if (b->kind == IN_AXIS && b->value == SDL_GAMEPAD_AXIS_LEFT_TRIGGER) return "l2";
+    if (b->kind == IN_AXIS && b->value == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) return "r2";
+    return NULL;
+}
+
 /* ---- Binding resolution for one input token ------------------------------------------ */
 
 static int ResolveInput(const char *token, InputBinding *out) {
@@ -187,13 +227,29 @@ static int ResolveInput(const char *token, InputBinding *out) {
 
 /* ---- Hotkey reservation (HOT-001, HOT-002) -------------------------------------------- */
 
-/* Reserved no matter what the file says: the menu (Insert) and BB_PAD_RECORD (F9).
+/* The key that opens the in-game menu (BB_MENU_KEY, the launcher's Controls page: Insert by
+ * default, "none" for no key): reserved, and Insert bindable once the menu is elsewhere. */
+static int32_t MenuScancode(void) {
+    static int32_t scancode = -2;
+    if (scancode == -2) {
+        const char *name = getenv("BB_MENU_KEY");
+        if (!name || !*name) scancode = SDL_SCANCODE_INSERT;
+        else if (!SDL_strcasecmp(name, "none")) scancode = SDL_SCANCODE_UNKNOWN;
+        else {
+            const SDL_Scancode found = SDL_GetScancodeFromName(name);
+            scancode = found != SDL_SCANCODE_UNKNOWN ? (int32_t)found : SDL_SCANCODE_INSERT;
+        }
+    }
+    return scancode;
+}
+
+/* Reserved no matter what the file says: the menu's key (Insert) and BB_PAD_RECORD (F9).
  * Escape is bindable: the overlay only uses it to close an open menu or cancel text entry,
  * and the pad is neutral while either is open (bbgpu_overlay_captures_input).
  * Used both for game-output bindings and for the hotkey lines themselves (HOT-001): F9 cannot
  * become hotkey_reload_inputs's key either, not just a cross/circle/... binding. */
 static int IsUnconditionallyReserved(int32_t scancode) {
-    return scancode == SDL_SCANCODE_INSERT || scancode == SDL_SCANCODE_F9;
+    return (MenuScancode() != SDL_SCANCODE_UNKNOWN && scancode == MenuScancode()) || scancode == SDL_SCANCODE_F9;
 }
 /* Reserved for game-output bindings specifically: the above, plus whichever key currently
  * toggles the mouse or reloads input.ini (HOT-002). */
@@ -218,8 +274,11 @@ typedef struct {
  * (spec section 9): "cross = space" twice must leave exactly one binding, not two identical
  * ones that would otherwise just double-count toward INPUT_MAX_BINDINGS_PER_OUTPUT. */
 static int SameBinding(const InputBinding *a, const InputBinding *b) {
-    return a->kind == b->kind && a->value == b->value &&
-           (a->kind != IN_AXIS_HALF || a->half_sign == b->half_sign);
+    if (a->kind != b->kind || a->value != b->value || a->extra_count != b->extra_count) return 0;
+    if (a->kind == IN_AXIS_HALF && a->half_sign != b->half_sign) return 0;
+    for (uint8_t i = 0; i < a->extra_count; ++i)
+        if (a->extra[i].kind != b->extra[i].kind || a->extra[i].value != b->extra[i].value) return 0;
+    return 1;
 }
 static void AddBinding(InputConfig *cfg, InputOutput out, InputBinding binding) {
     uint8_t *count = &cfg->table.binding_count[out];
@@ -278,6 +337,29 @@ static void ParseMouseCameraSensitivity(InputConfig *cfg, const char *value) {
     float v = ParseFloatStrict(value, &ok);
     if (!ok || v < 0.05f || v > 20.0f) { ++cfg->warnings; return; }
     cfg->mouse.camera_sensitivity = v;
+}
+
+/* on|off for the yes/no settings (mouse_invert_x, mouse_invert_y, mouse_camera_sync). */
+static void ParseOnOff(InputConfig *cfg, const char *value, int *out) {
+    if (EqualsCaseInsensitive(value, "on")) *out = 1;
+    else if (EqualsCaseInsensitive(value, "off")) *out = 0;
+    else ++cfg->warnings;
+}
+
+/* mouse_sensitivity_y = 0.1..10: vertical mouse speed as a multiple of the horizontal one. */
+static void ParseMouseSensitivityY(InputConfig *cfg, const char *value) {
+    int ok;
+    float v = ParseFloatStrict(value, &ok);
+    if (!ok || v < 0.1f || v > 10.0f) { ++cfg->warnings; return; }
+    cfg->mouse.sensitivity_y = v;
+}
+
+/* mouse_lock_switch = 0..2000: mouse counts that switch the lock-on target (0 = off). */
+static void ParseMouseLockSwitch(InputConfig *cfg, const char *value) {
+    int ok;
+    float v = ParseFloatStrict(value, &ok);
+    if (!ok || v < 0.0f || v > 2000.0f) { ++cfg->warnings; return; }
+    cfg->mouse.lock_switch = (int)v;
 }
 
 /* stick_socd = last|neutral: what two opposite directions held together give (runtime_pad.c,
@@ -386,6 +468,26 @@ static void ParseLine(ParseState *state, char *line) {
         ParseMouseCameraSensitivity(cfg, input_raw);
         return;
     }
+    if (EqualsCaseInsensitive(output_raw, "mouse_invert_x") || EqualsCaseInsensitive(output_raw, "mouse_invert_y")) {
+        if (!state->hotkeys_pass) return;
+        ParseOnOff(cfg, input_raw, EqualsCaseInsensitive(output_raw, "mouse_invert_x") ? &cfg->mouse.invert_x : &cfg->mouse.invert_y);
+        return;
+    }
+    if (EqualsCaseInsensitive(output_raw, "mouse_camera_sync")) {
+        if (!state->hotkeys_pass) return;
+        ParseOnOff(cfg, input_raw, &cfg->mouse.camera_sync);
+        return;
+    }
+    if (EqualsCaseInsensitive(output_raw, "mouse_sensitivity_y")) {
+        if (!state->hotkeys_pass) return;
+        ParseMouseSensitivityY(cfg, input_raw);
+        return;
+    }
+    if (EqualsCaseInsensitive(output_raw, "mouse_lock_switch")) {
+        if (!state->hotkeys_pass) return;
+        ParseMouseLockSwitch(cfg, input_raw);
+        return;
+    }
     if (EqualsCaseInsensitive(output_raw, "stick_socd")) {
         if (!state->hotkeys_pass) return;
         ParseStickSocd(cfg, input_raw);
@@ -408,9 +510,8 @@ static void ParseLine(ParseState *state, char *line) {
     }
 
     /* Hotkey lines (HOT-002): resolved in the hotkeys pass so IsReservedScancode is accurate
-     * for the main pass that follows. A combo here (comma) is rejected the same as any other
-     * output, by the CFG-005 check below -- so this must run before that check consumes the
-     * line in the hotkeys pass. */
+     * for the main pass that follows. A hotkey is one key: a combo (comma) is rejected here,
+     * unlike for a game output (CFG-005 below). */
     if (EqualsCaseInsensitive(output_raw, "hotkey_toggle_mouse_to_joystick") ||
         EqualsCaseInsensitive(output_raw, "hotkey_reload_inputs")) {
         if (!state->hotkeys_pass) return;
@@ -426,10 +527,6 @@ static void ParseLine(ParseState *state, char *line) {
     }
     if (state->hotkeys_pass) return; /* everything else is handled only in the main pass */
 
-    /* CFG-005: one input per line; a comma here means a combo, which is out of scope. Checked
-     * only in the main pass (reached once per line, unlike the hotkey branch above). */
-    if (strchr(input_raw, ',')) { ++cfg->warnings; return; }
-
     InputOutput out;
     if (!input_output_from_name(output_raw, &out)) {
         /* CFG-006: either an output this port never supports (key_toggle, the shadPS4 hotkeys
@@ -438,12 +535,39 @@ static void ParseLine(ParseState *state, char *line) {
         ++cfg->warnings;
         return;
     }
-    InputBinding binding;
-    if (!ResolveInput(input_raw, &binding)) { ++cfg->warnings; return; }
-    if (binding.kind == IN_NONE) return; /* "unmapped": explicitly no binding, not a warning */
 
-    /* HOT-001: a game-output binding cannot use a reserved key. */
-    if (binding.kind == IN_KEY && IsReservedScancode(binding.value, cfg)) { ++cfg->warnings; return; }
+    /* CFG-005: "a, b, c" is a combo, up to INPUT_MAX_COMBO inputs held together (shadPS4).
+     * Checked only in the main pass (reached once per line, unlike the hotkey branch above). */
+    InputBinding parts[INPUT_MAX_COMBO];
+    int count = 0;
+    for (char *token = input_raw, *next; token; token = next) {
+        next = strchr(token, ',');
+        if (next) *next++ = '\0';
+        if (count == INPUT_MAX_COMBO || !*token) { ++cfg->warnings; return; }
+        memset(&parts[count], 0, sizeof(parts[count]));
+        if (!ResolveInput(token, &parts[count])) { ++cfg->warnings; return; }
+        /* HOT-001: a game-output binding cannot use a reserved key, alone or in a combo. */
+        if (parts[count].kind == IN_KEY && IsReservedScancode(parts[count].value, cfg)) { ++cfg->warnings; return; }
+        ++count;
+    }
+    if (count == 1 && parts[0].kind == IN_NONE) return; /* "unmapped": explicitly no binding, not a warning */
+
+    InputBinding binding = parts[0];
+    if (count > 1) {
+        /* A combo is digital: an analog stick or trigger, or "unmapped", cannot be one of its
+         * inputs, and an input cannot appear twice. */
+        for (int i = 0; i < count; ++i) {
+            InputKind kind = parts[i].kind;
+            if (kind != IN_KEY && kind != IN_MOUSE_BUTTON && kind != IN_MOUSE_WHEEL && kind != IN_CBUTTON) {
+                ++cfg->warnings;
+                return;
+            }
+            for (int j = 0; j < i; ++j)
+                if (parts[j].kind == kind && parts[j].value == parts[i].value) { ++cfg->warnings; return; }
+        }
+        binding.extra_count = (uint8_t)(count - 1);
+        for (int i = 1; i < count; ++i) binding.extra[i - 1] = (InputComboPart){parts[i].kind, parts[i].value};
+    }
 
     AddBinding(cfg, out, binding);
 }
@@ -479,11 +603,15 @@ void input_config_parse(InputConfig *out, const char *text) {
     out->mouse.stick = 0;
     out->mouse.camera_direct = 0;
     out->mouse.camera_sensitivity = 1.0f;
+    out->mouse.sensitivity_y = 1.0f;
+    out->mouse.camera_sync = 1;
+    out->mouse.lock_switch = 60;
     for (int i = 0; i < DEADZONE_COUNT; ++i) { out->deadzone[i].inner = 1; out->deadzone[i].outer = 127; }
     out->stick_socd_last = 1;
-    out->stick_release_delay_ms = 0;
-    out->stick_circular = 1;
-    out->stick_turn_rate = 0;
+    /* Defaults that keep a keyboard sprint through direction changes (cassioKenji, PR #74). */
+    out->stick_release_delay_ms = 60;
+    out->stick_circular = 0;
+    out->stick_turn_rate = 900;
     out->toggle_scancode = SDL_SCANCODE_F7;
     out->reload_scancode = SDL_SCANCODE_F8;
 

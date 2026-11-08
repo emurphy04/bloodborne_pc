@@ -14,11 +14,23 @@ Output: out/boot-linked.bin (format BBPROBE5) and out/link.json.
 import bisect
 import collections
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import struct
-from prepare import parse_self, span, unpack
+import sys
+
+# Script roles share a process in the Windows launcher. Refresh ``prepare``
+# from this scripts directory in case an older frozen/cached copy is present.
+_prepare_spec = importlib.util.spec_from_file_location(
+    'prepare', Path(__file__).with_name('prepare.py'))
+if _prepare_spec is None or _prepare_spec.loader is None:
+    raise ImportError('could not load prepare.py beside link_modules.py')
+_prepare = importlib.util.module_from_spec(_prepare_spec)
+sys.modules['prepare'] = _prepare
+_prepare_spec.loader.exec_module(_prepare)
+parse_self, span, unpack = _prepare.parse_self, _prepare.span, _prepare.unpack
 from link_libc import encode_id
 from cpu_compat import atomic_output, patch_image, patch_libc
 
@@ -327,9 +339,9 @@ def link(game, out, module_names=DEFAULT_MODULES):
               f"{cpu_compat['unhandled_count']} remain unhandled; "
               f"trampolines={cpu_compat['trampoline_bytes']} bytes")
         if cpu_compat['span_patches']:
-            print(f"CPU compatibility EXPERIMENTAL: {cpu_compat['span_patches']} count instructions translated "
-                  'as signed two-instruction spans; their MOV/CMP neighbors are preserved. '
-                  'Global indirect entries remain unproven.')
+            print(f"CPU compatibility: {cpu_compat['span_patches']} short instructions translated with their "
+                  'neighbors moved along (no jump into them was found; jump tables are not '
+                  'globally proven).')
         if cpu_compat['semantic_risk_sites']:
             print(f"CPU compatibility EXPERIMENTAL: {cpu_compat['semantic_risk_sites']} count instructions "
                   'can still have incorrect semantics; this is not a complete compatibility profile.')

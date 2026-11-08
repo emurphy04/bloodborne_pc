@@ -11,6 +11,7 @@
 #include <sys/resource.h>
 #endif
 #include "common/assert.h"
+#include "bbport_settings.h"
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
@@ -22,6 +23,7 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -569,6 +571,10 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         const auto& group = port->groups[buffer.group_index];
         frame = presenter->PrepareFrame(group, buffer.address_left);
     }
+    // bbport: the game frame this flip shows, for the latency markers (vk_low_latency.h).
+    if (frame) {
+        frame->latency_id = is_eop && index != -1 ? Vulkan::LowLatency::RenderSubmitEnd() : 0;
+    }
 
     {
         std::scoped_lock lock{mutex};
@@ -602,10 +608,22 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // only from the flip (PR #28 as proposed) added the wake-up delay to every frame: 116 FPS
     // at a cap of 120.
     const u32 frame_limit = EmulatorSettings.GetFrameLimit();
-    const auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
-                                          : std::chrono::nanoseconds(0);
-    const auto slack = frame_period / 16;
+    // bbport: frame generation with FIFO presentation lowers the limit while it runs
+    // (BbSettings::frame_gen_flip_limit, set by the Presenter).
+    const auto period_now = [frame_limit] {
+        const int fg_limit = BbSettings::Get().frame_gen_flip_limit.load(std::memory_order_relaxed);
+        // bbport: low latency keeps the limit before the game starts a frame; a finished one is
+        // shown at once (vk_low_latency.h).
+        if (fg_limit <= 0 && Vulkan::LowLatency::PacesFrames()) {
+            return std::chrono::nanoseconds(0);
+        }
+        const u32 limit = fg_limit > 0 && frame_limit ? std::min(frame_limit, u32(fg_limit))
+                                                      : frame_limit;
+        return limit ? std::chrono::nanoseconds(1000000000 / limit) : std::chrono::nanoseconds(0);
+    };
     const auto next_slot = [&](std::chrono::steady_clock::time_point slot) {
+        const auto frame_period = period_now();
+        const auto slack = frame_period / 16;
         return std::max(slot + frame_period,
                         std::chrono::steady_clock::now() + frame_period - slack);
     };

@@ -11,14 +11,24 @@
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_checkpoints.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_fsr4vk.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
 #include <vk_mem_alloc.h>
 
 #include <atomic>
 #include <cstdio>
+#ifdef _WIN32
+#include "native_fsr411.h"
+#include "native_fg401.h"
+#include "fg401_support.h"
+#include "fsr411_support.h"
+#include "fsr411_vulkan_support.h"
+#endif
 
 namespace Vulkan {
 
@@ -204,6 +214,49 @@ Instance::~Instance() {
     vmaDestroyAllocator(allocator);
 }
 
+void Instance::ReportDeviceLost(const char* where) const {
+    static std::atomic<bool> reported{false};
+    if (reported.exchange(true)) {
+        return;
+    }
+    std::printf("GPU: device lost (%s)\n", where);
+    if (!device_fault) {
+        std::printf("GPU: the driver gives no fault details (VK_EXT_device_fault unavailable)\n");
+        std::fflush(stdout);
+        Checkpoints::Dump(graphics_queue);
+        return;
+    }
+    vk::DeviceFaultCountsEXT counts{};
+    if (device->getFaultInfoEXT(&counts, nullptr) != vk::Result::eSuccess &&
+        counts.addressInfoCount == 0 && counts.vendorInfoCount == 0) {
+        std::printf("GPU: no fault details from the driver\n");
+        std::fflush(stdout);
+        Checkpoints::Dump(graphics_queue);
+        return;
+    }
+    std::vector<vk::DeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<vk::DeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
+    vk::DeviceFaultInfoEXT info{};
+    info.pAddressInfos = addresses.data();
+    info.pVendorInfos = vendor.data();
+    counts.vendorBinarySize = 0; // the vendor binary dump is not written
+    (void)device->getFaultInfoEXT(&counts, &info);
+    std::printf("GPU: fault: %s\n", info.description.data());
+    for (const auto& address : addresses) {
+        std::printf("GPU: fault address %s %#llx (+/- %#llx)\n",
+                    vk::to_string(address.addressType).c_str(),
+                    static_cast<unsigned long long>(address.reportedAddress),
+                    static_cast<unsigned long long>(address.addressPrecision));
+    }
+    for (const auto& item : vendor) {
+        std::printf("GPU: fault vendor info: %s (code %#llx, data %#llx)\n", item.description.data(),
+                    static_cast<unsigned long long>(item.vendorFaultCode),
+                    static_cast<unsigned long long>(item.vendorFaultData));
+    }
+    std::fflush(stdout);
+    Checkpoints::Dump(graphics_queue); // which draw or dispatch the GPU was on
+}
+
 std::string Instance::GetDriverVersionName() {
     // Extracted from
     // https://github.com/SaschaWillems/vulkan.gpuinfo.org/blob/5dddea46ea1120b0df14eef8f15ff8e318e35462/functions.php#L308-L314
@@ -234,7 +287,11 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
         vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
         vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
-        vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>();
+        vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
+        vk::PhysicalDeviceMutableDescriptorTypeFeaturesEXT,
+        vk::PhysicalDeviceDescriptorBufferFeaturesEXT,
+        vk::PhysicalDeviceFaultFeaturesEXT, vk::PhysicalDevicePresentIdFeaturesKHR,
+        vk::PhysicalDeviceAntiLagFeaturesAMD>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -289,6 +346,9 @@ bool Instance::CreateDevice() {
 
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+    // bbport: after a device loss the driver says where the GPU faulted (ReportDeviceLost).
+    device_fault = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault &&
+                   add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
@@ -375,6 +435,43 @@ bool Instance::CreateDevice() {
         feature_chain.get<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>()
             .shaderMixedFloatDotProductFloat16AccFloat32 &&
         add_extension(VK_VALVE_SHADER_MIXED_FLOAT_DOT_PRODUCT_EXTENSION_NAME);
+#ifdef _WIN32
+    const char* native_setting = std::getenv("BB_FSR411_NATIVE");
+    const char* fsr411_backend = std::getenv("BB_FSR411_BACKEND");
+    const bool native_requested = (native_setting && native_setting[0] == '1') ||
+        (fsr411_backend && std::string_view{fsr411_backend} == "dx12");
+    // Both DX12 versions share resources independently of their provider availability.
+    const auto dx12_interop = ProbeFsrDx12Interop(physical_device);
+    native_fsr411_async = dx12_interop.supported &&
+        add_extension("VK_KHR_external_memory_win32") &&
+        add_extension("VK_KHR_external_semaphore_win32");
+    fsr_dx12_interop_status = native_fsr411_async ? 0 :
+        dx12_interop.supported ? 7 : FsrSupportCode(dx12_interop);
+    native_fsr411_status = GetVendorID() == 0x1002 ? 5 : 1;
+    if (GetVendorID() == 0x1002 || native_requested) {
+        const auto id = physical_device.getProperties2<vk::PhysicalDeviceProperties2,
+            vk::PhysicalDeviceIDProperties>().get<vk::PhysicalDeviceIDProperties>();
+        const auto support = GetVendorID() != 0x1002
+            ? Fsr411Support{false, "hardware", "AMD GPU required"}
+            : !dx12_interop.supported ? dx12_interop : ProbeFsr411Dx12(id.deviceLUID.data());
+        native_fsr411 = support.supported && native_fsr411_async;
+        native_fsr411_status = support.supported ? fsr_dx12_interop_status : FsrSupportCode(support);
+        if (!support.supported) {
+            const auto category = std::string_view{support.reason} == "files" ? "missing provider file" :
+                std::string_view{support.reason} == "runtime" ? "runtime load failure" :
+                "GPU/driver/provider requirement";
+            native_fsr411_problem = std::string("AMD DX12: ") + category + " - " + support.detail;
+        } else if (!native_fsr411)
+            native_fsr411_problem = "AMD DX12: GPU/driver lacks Vulkan/DX12 shared-memory support";
+    }
+    fg401_interop = IsRx9000(GetVendorID(),physical_device.getProperties().deviceName.data()) &&
+        Fg401WindowsSupported() && NativeFg401::Available() && native_fsr411_async;
+    if (native_fsr411 && !native_fsr411_async)
+        native_fsr411_problem = "AMD DX12: GPU/driver lacks shared GPU-fence support";
+    if (native_requested) fsr411_problem = native_fsr411_problem;
+    std::printf("FSR411 GPU fence interop: %s\n", native_fsr411_async ? "available" : "unavailable");
+    if (native_fsr411) std::printf("FSR 4.1.1: native Windows DX12 backend available\n");
+#endif
     if (compute_shader_derivatives) {
         compute_shader_derivatives_features =
             feature_chain.get<vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
@@ -384,6 +481,24 @@ bool Instance::CreateDevice() {
         shader_clock_features = feature_chain.get<vk::PhysicalDeviceShaderClockFeaturesKHR>();
         LOG_INFO(Render_Vulkan, "- shaderSubgroupClock: {}",
                  shader_clock_features.shaderSubgroupClock);
+    }
+    // bbport: low latency (BB_LOW_LATENCY=on or boost): NVIDIA Reflex, else AMD Anti-Lag 2.
+    // Only enabled when chosen; see vk_low_latency.cpp.
+    if (LowLatency::Wanted(GetVendorID())) {
+        present_id = feature_chain.get<vk::PhysicalDevicePresentIdFeaturesKHR>().presentId &&
+                     add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        nv_low_latency = present_id &&
+                         feature_chain.get<vk::PhysicalDeviceVulkan12Features>().timelineSemaphore &&
+                         add_extension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
+        amd_anti_lag = !nv_low_latency &&
+                       feature_chain.get<vk::PhysicalDeviceAntiLagFeaturesAMD>().antiLag &&
+                       add_extension(VK_AMD_ANTI_LAG_EXTENSION_NAME);
+    }
+    // bbport: GPU checkpoints (BB_GPU_CHECKPOINTS=1): NVIDIA's, else AMD's buffer markers. Only
+    // enabled when asked for; see vk_checkpoints.cpp.
+    if (Checkpoints::Wanted()) {
+        nv_checkpoints = add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        amd_buffer_marker = !nv_checkpoints && add_extension(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
     }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
@@ -408,17 +523,56 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    static constexpr std::array queue_priorities = {1.0f};
+    const bool detached = fg401_interop && family_properties[queue_family_index].queueCount >= 2;
+    fg401_interop = fg401_interop && detached;
+    const u32 queue_count = detached ? 2u : 1u;
+    static constexpr std::array queue_priorities = {1.0f, 1.0f};
     const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,
-        .queueCount = static_cast<u32>(queue_priorities.size()),
+        .queueCount = queue_count,
         .pQueuePriorities = queue_priorities.data(),
     };
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
+    // bbport: FSR 4.1.1 through the fsr4vk provider DLL (vk_fsr4vk.cpp). Its device requirements
+    // (provider/INTEGRATION-CONTRACT.md) are standard features and two extensions; they are
+    // requested only when the DLL is installed and the device has all of them, so nothing changes
+    // for other paths.
+#ifdef _WIN32
+    const char* missing_fsr4vk_feature = Fsr411VulkanRequirement(physical_device,
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceProperties,
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateDeviceExtensionProperties,
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2);
+    const bool fsr4vk_files = Fsr4Vk::FilesPresent();
+    fsr4vk = fsr4vk_files && !missing_fsr4vk_feature;
+    const char* fsr4vk_enabled = std::getenv("BB_FSR4VK");
+    const bool query_failed = missing_fsr4vk_feature &&
+        !std::strcmp(missing_fsr4vk_feature, "Vulkan extension query");
+    fsr4vk_status = fsr4vk ? 0 : fsr4vk_enabled && fsr4vk_enabled[0] == '0' ? 6 :
+        missing_fsr4vk_feature && !query_failed ? 2 : !fsr4vk_files ? 4 : 5;
+    if (!native_requested && !fsr4vk) {
+        if (const char* enabled = std::getenv("BB_FSR4VK"); enabled && enabled[0] == '0')
+            fsr411_problem = "Vulkan (fsr4vk): disabled by BB_FSR4VK=0";
+        else if (!fsr4vk_files)
+            fsr411_problem = "Vulkan (fsr4vk): missing amd_fidelityfx_upscaler_vk.dll; download fsr4vk in Graphics";
+        else if (std::string_view{missing_fsr4vk_feature} == "Vulkan extension query")
+            fsr411_problem = "Vulkan (fsr4vk): device capability query failed";
+        else
+            fsr411_problem = std::string("Vulkan (fsr4vk): GPU/driver lacks ") + missing_fsr4vk_feature;
+    }
+#else
+    fsr4vk = false; // The original Vulkan implementation is used on Linux.
+#endif
+    if (fsr4vk) {
+        add_extension(VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME);
+        add_extension(VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
+        LOG_INFO(Render_Vulkan, "fsr4vk: {} found, its device features are enabled",
+                 Fsr4Vk::LibraryPathUtf8());
+    }
     // bbport: DLSS (optional bridge DLL) needs its own device extensions on NVIDIA GPUs.
+    const size_t renderer_extension_count = enabled_extensions.size();
     std::vector<const char*> dlss_extensions;
     if (Dlss* dlss = Dlss::Get()) {
         dlss->AppendDeviceExtensions(*instance, physical_device, dlss_extensions);
@@ -461,6 +615,7 @@ bool Instance::CreateDevice() {
                 .shaderStorageImageExtendedFormats = features.shaderStorageImageExtendedFormats,
                 .shaderStorageImageMultisample = features.shaderStorageImageMultisample,
                 // bbport: required by the FSR 3 accumulate shaders (vk_temporal_upscaler).
+                .shaderStorageImageReadWithoutFormat = fsr4vk,
                 .shaderStorageImageWriteWithoutFormat =
                     features.shaderStorageImageWriteWithoutFormat,
                 .shaderClipDistance = features.shaderClipDistance,
@@ -483,6 +638,8 @@ bool Instance::CreateDevice() {
             .shaderSharedInt64Atomics = vk12_features.shaderSharedInt64Atomics,
             .shaderFloat16 = vk12_features.shaderFloat16,
             .shaderInt8 = vk12_features.shaderInt8,
+            .descriptorBindingVariableDescriptorCount = fsr4vk,
+            .runtimeDescriptorArray = fsr4vk,
             .scalarBlockLayout = vk12_features.scalarBlockLayout,
             .uniformBufferStandardLayout = vk12_features.uniformBufferStandardLayout,
             .separateDepthStencilLayouts = vk12_features.separateDepthStencilLayouts,
@@ -500,6 +657,8 @@ bool Instance::CreateDevice() {
             .shaderIntegerDotProduct = vk13_features.shaderIntegerDotProduct,
             .maintenance4 = vk13_features.maintenance4,
         },
+        vk::PhysicalDeviceMutableDescriptorTypeFeaturesEXT{.mutableDescriptorType = fsr4vk},
+        vk::PhysicalDeviceDescriptorBufferFeaturesEXT{.descriptorBuffer = fsr4vk},
         // Extensions
         vk::PhysicalDeviceCustomBorderColorFeaturesEXT{
             .customBorderColors = true,
@@ -539,6 +698,9 @@ bool Instance::CreateDevice() {
         },
         vk::PhysicalDeviceMaintenance5FeaturesKHR{
             .maintenance5 = true,
+        },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = true,
         },
         vk::PhysicalDeviceMaintenance8FeaturesKHR{
             .maintenance8 = true,
@@ -583,8 +745,18 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE{
             .shaderMixedFloatDotProductFloat16AccFloat32 = true,
         },
+        vk::PhysicalDevicePresentIdFeaturesKHR{
+            .presentId = true,
+        },
+        vk::PhysicalDeviceAntiLagFeaturesAMD{
+            .antiLag = true,
+        },
     };
 
+    if (!fsr4vk) {
+        device_chain.unlink<vk::PhysicalDeviceMutableDescriptorTypeFeaturesEXT>();
+        device_chain.unlink<vk::PhysicalDeviceDescriptorBufferFeaturesEXT>();
+    }
     if (!custom_border_color) {
         device_chain.unlink<vk::PhysicalDeviceCustomBorderColorFeaturesEXT>();
     }
@@ -611,6 +783,9 @@ bool Instance::CreateDevice() {
     }
     if (!maintenance_5) {
         device_chain.unlink<vk::PhysicalDeviceMaintenance5FeaturesKHR>();
+    }
+    if (!device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
     }
     if (!maintenance_8) {
         device_chain.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
@@ -640,8 +815,31 @@ bool Instance::CreateDevice() {
     if (!mixed_float_dot_product) {
         device_chain.unlink<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>();
     }
+    if (!present_id) {
+        device_chain.unlink<vk::PhysicalDevicePresentIdFeaturesKHR>();
+    }
+    if (!amd_anti_lag) {
+        device_chain.unlink<vk::PhysicalDeviceAntiLagFeaturesAMD>();
+    }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
+    if (device_result != vk::Result::eSuccess && enabled_extensions.size() > renderer_extension_count) {
+        // bbport: NGX can list its extensions while a driver part they need is missing or out
+        // of date. DLSS is optional: retry without its extensions, with DLSS off for this run.
+        // From parsifal295 (PR #58).
+        LOG_WARNING(Render_Vulkan, "Device creation with the DLSS extensions failed: {}; retrying "
+                                   "without DLSS", vk::to_string(device_result));
+        if (Dlss* dlss = Dlss::Get()) {
+            dlss->Disable(fmt::format("the Vulkan device failed with its extensions: {} (update "
+                                      "or reinstall the NVIDIA driver)",
+                                      vk::to_string(device_result)));
+        }
+        enabled_extensions.resize(renderer_extension_count);
+        device_chain.get().enabledExtensionCount = static_cast<u32>(enabled_extensions.size());
+        auto retry = physical_device.createDeviceUnique(device_chain.get());
+        device_result = retry.result;
+        dev = std::move(retry.value);
+    }
     if (device_result != vk::Result::eSuccess) {
         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));
         return false;
@@ -649,12 +847,14 @@ bool Instance::CreateDevice() {
     device = std::move(dev);
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
+    LowLatency::Init(*this);
     if (Dlss* dlss = Dlss::Get()) {
         dlss->Initialize(*instance, physical_device, *device);
     }
 
     graphics_queue = device->getQueue(queue_family_index, 0);
-    present_queue = device->getQueue(queue_family_index, 0);
+    present_queue = device->getQueue(queue_family_index, detached ? 1 : 0);
+    if (detached) std::printf("ML-FG: Vulkan graphics queue 0, completion/present queue 1, family %u\n", queue_family_index);
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =
@@ -688,6 +888,7 @@ bool Instance::CreateDevice() {
     }
 
     CreateAllocator();
+    Checkpoints::Init(*this); // AMD's markers need the allocator
     return true;
 }
 
@@ -729,6 +930,20 @@ void Instance::CollectDeviceParameters() {
     const std::string api_version = GetReadableVersion(properties.apiVersion);
     const std::string extensions = fmt::format("{}", fmt::join(available_extensions, ", "));
 
+    // bbport: the GPU, its VRAM and the driver in every log (LOG_INFO is filtered out by
+    // default), flushed so it is there even if the device is lost right after. Idea from
+    // parsifal295 (PR #61).
+    u64 vram = 0;
+    const auto heaps = physical_device.getMemoryProperties();
+    for (u32 i = 0; i < heaps.memoryHeapCount; ++i) {
+        if (heaps.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+            vram = std::max<u64>(vram, heaps.memoryHeaps[i].size);
+        }
+    }
+    std::printf("GPU: %s%s, %llu MiB VRAM, driver %s (%s), Vulkan %s\n", model_name.c_str(),
+                IsIntegrated() ? " (integrated)" : "", static_cast<unsigned long long>(vram >> 20),
+                driver_name.c_str(), driver.driverInfo.data(), api_version.c_str());
+    std::fflush(stdout);
     LOG_INFO(Render_Vulkan, "GPU_Vendor: {}", vendor_name);
     LOG_INFO(Render_Vulkan, "GPU_Model: {}", model_name);
     LOG_INFO(Render_Vulkan, "GPU_Integrated: {}", IsIntegrated() ? "Yes" : "No");
@@ -837,32 +1052,31 @@ void Instance::CollectToolingInfo() const {
     }
 }
 
-u64 Instance::GetDeviceMemoryUsage() const {
+void Instance::GetDeviceMemoryStats(u64& usage, u64& budget) const {
     vk::PhysicalDeviceMemoryBudgetPropertiesEXT memory_budget_props{};
     vk::PhysicalDeviceMemoryProperties2 props = {
         .pNext = &memory_budget_props,
     };
     physical_device.getMemoryProperties2(&props);
 
-    u64 total_usage = 0;
+    usage = 0;
+    budget = 0;
     for (const size_t heap : valid_heaps) {
-        total_usage += memory_budget_props.heapUsage[heap];
+        usage += memory_budget_props.heapUsage[heap];
+        budget += memory_budget_props.heapBudget[heap];
     }
-    return total_usage;
+}
+
+u64 Instance::GetDeviceMemoryUsage() const {
+    u64 usage = 0, budget = 0;
+    GetDeviceMemoryStats(usage, budget);
+    return usage;
 }
 
 u64 Instance::GetDeviceMemoryBudgetNow() const {
-    vk::PhysicalDeviceMemoryBudgetPropertiesEXT memory_budget_props{};
-    vk::PhysicalDeviceMemoryProperties2 props = {
-        .pNext = &memory_budget_props,
-    };
-    physical_device.getMemoryProperties2(&props);
-
-    u64 total_budget = 0;
-    for (const size_t heap : valid_heaps) {
-        total_budget += memory_budget_props.heapBudget[heap];
-    }
-    return total_budget;
+    u64 usage = 0, budget = 0;
+    GetDeviceMemoryStats(usage, budget);
+    return budget;
 }
 
 vk::FormatFeatureFlags2 Instance::GetFormatFeatureFlags(vk::Format format) const {

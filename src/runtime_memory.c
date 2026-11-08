@@ -62,7 +62,10 @@ _Static_assert(sizeof(BatchEntry)==32,"PS4 batch map entry layout");
  * protection) share it; map/unmap/protect take it exclusively. Both nest: code
  * under the lock may write guest memory, and a GPU-tracked page then faults into
  * runtime_memory_gpu_protect on the same thread. Readers nest because glibc's
- * default rwlock prefers readers; a thread holding it exclusively skips relocking. */
+ * default rwlock prefers readers; a thread holding it exclusively skips relocking.
+ * The game's own arguments and results (pointers it passes in) are read before the lock and
+ * written after it: such a page may be GPU-tracked, and its fault drains the draw pipe, whose
+ * recording thread looks regions up here for every draw (a freeze while the game mapped). */
 static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
 static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
@@ -135,15 +138,99 @@ static void region_insert(size_t at, HostRegion r) {
 static void region_erase(size_t at, size_t n) {
     memmove(regions+at,regions+at+n,(region_count-at-n)*sizeof(*regions)); region_count-=n;
 }
+/* What already holds part of the PS4 range (a DLL, often one an antivirus or overlay injects,
+ * or its memory): printed when the range cannot be reserved. */
+static void report_range_users(void) {
+    int shown=0;
+    for (uintptr_t at=USER_MIN; at<USER_MAX && shown<16;) {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery((void *)at,&mi,sizeof(mi)) || !mi.RegionSize) break;
+        const uintptr_t end=(uintptr_t)mi.BaseAddress+mi.RegionSize;
+        if (mi.State!=MEM_FREE) {
+            char name[MAX_PATH]="";
+            if (mi.Type==MEM_IMAGE) GetModuleFileNameA((HMODULE)mi.AllocationBase,name,sizeof(name));
+            fprintf(stderr,"Runtime: in the PS4 range: %p, %" PRIu64 " KiB, %s%s%s\n",mi.BaseAddress,
+                    (uint64_t)mi.RegionSize/1024,mi.Type==MEM_IMAGE ? "module " : mi.Type==MEM_MAPPED ? "mapped file" : "memory",
+                    name,mi.State==MEM_RESERVE ? " (reserved)" : "");
+            ++shown;
+        }
+        at=end;
+    }
+}
+/* Something took part of the range before main() (DLLs load first): this program starts again
+ * suspended, the range is reserved in the new process before any DLL is in it, and that
+ * process takes over (runtime_memory_reserve adopts the reservation). Returns only on failure. */
+static int restarted; /* this is the restarted process: never once more */
+static void restart_with_range(void) {
+    if (restarted) return;
+    SetEnvironmentVariableA("BB_RANGE_RESERVED","1");
+    STARTUPINFOW si={.cb=sizeof(si),.dwFlags=STARTF_USESTDHANDLES,.hStdInput=GetStdHandle(STD_INPUT_HANDLE),
+                     .hStdOutput=GetStdHandle(STD_OUTPUT_HANDLE),.hStdError=GetStdHandle(STD_ERROR_HANDLE)};
+    PROCESS_INFORMATION pi;
+    wchar_t *line=_wcsdup(GetCommandLineW());
+    const BOOL started=line && CreateProcessW(NULL,line,NULL,NULL,TRUE,CREATE_SUSPENDED,NULL,NULL,&si,&pi);
+    free(line);
+    SetEnvironmentVariableA("BB_RANGE_RESERVED",NULL);
+    if (!started) return;
+    if (!VirtualAlloc2(pi.hProcess,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0)) {
+        fprintf(stderr,"Runtime: the restarted game could not reserve the PS4 range either (error %lu)\n",GetLastError());
+        TerminateProcess(pi.hProcess,21);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return;
+    }
+    /* The new process ends with this one (the launcher's Stop, run.py ending). */
+    HANDLE job=CreateJobObjectA(NULL,NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};
+    limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (job && SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)))
+        AssignProcessToJobObject(job,pi.hProcess);
+    fprintf(stderr,"Runtime: the PS4 range is taken in this process; the game starts again with it reserved first\n");
+    fflush(stderr);
+    ResumeThread(pi.hThread);
+    WaitForSingleObject(pi.hProcess,INFINITE);
+    DWORD code=21;
+    GetExitCodeProcess(pi.hProcess,&code);
+    ExitProcess(code);
+}
 /* The guest range is reserved before anything else can be placed there (runtime_start). */
 void runtime_memory_reserve(void) {
     if (region_count) return;
-    if (!VirtualAlloc2(NULL,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
+    const char *reserved=getenv("BB_RANGE_RESERVED");
+    if (reserved && reserved[0]=='1') {
+        restarted=1;
+        /* Restarted: the first process reserved it here before this one ran (restart_with_range).
+         * Not passed on to a later start (the in-game restart). */
+        _putenv("BB_RANGE_RESERVED=");
+        MEMORY_BASIC_INFORMATION mi;
+        if (VirtualQuery((void *)USER_MIN,&mi,sizeof(mi)) && mi.State==MEM_RESERVE &&
+            (uintptr_t)mi.AllocationBase==USER_MIN && mi.RegionSize==USER_MAX-USER_MIN) {
+            printf("Runtime: the PS4 range was reserved before the program's DLLs loaded\n");
+            region_insert(0,(HostRegion){USER_MIN,USER_MAX,0,0});
+            return;
+        }
+    }
+    if (!VirtualAlloc2(NULL,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0)) {
+        const DWORD error=GetLastError();
+        report_range_users();
+        restart_with_range();
+        SetLastError(error);
         win_fail("reserving the PS4 address range (link with --disable-high-entropy-va)",USER_MIN,USER_MAX-USER_MIN);
+    }
     region_insert(0,(HostRegion){USER_MIN,USER_MAX,0,0});
+}
+/* Guest memory committed only as the game maps it: the whole pool did not fit Windows' commit
+ * limit (RAM + page file) at once (pool()). */
+static int commit_on_map;
+static void commit_backing(uint64_t phys, uint64_t size) {
+    if (!commit_on_map || VirtualAlloc(backing_base+phys,size,MEM_COMMIT,PAGE_READWRITE)) return;
+    fprintf(stderr,"Runtime: cannot commit %" PRIu64 " MiB more guest memory (error %lu): Windows' "
+            "page file is too small for this resolution; let Windows manage its size, or use a "
+            "lower output resolution\n",size>>20,GetLastError());
+    win_fail("committing guest memory",(uintptr_t)(backing_base+phys),size);
 }
 static void view_map(const HostRegion *r, DWORD protect) {
     DWORD initial=protect==PAGE_NOACCESS ? PAGE_READWRITE : protect, old;
+    commit_backing(r->phys,r->end-r->start);
     if (!MapViewOfFile3(section,GetCurrentProcess(),(void *)r->start,r->phys,r->end-r->start,MEM_REPLACE_PLACEHOLDER,initial,NULL,0))
         win_fail("MapViewOfFile3",r->start,r->end-r->start);
     if (initial!=protect && !VirtualProtect((void *)r->start,r->end-r->start,protect,&old))
@@ -230,13 +317,28 @@ static int host_protect(uintptr_t address, uint64_t size, int prot) {
     return 0;
 }
 /* Released pages read as zero when reused, like the memfd's punched holes. */
-static void host_discard(uint64_t phys, uint64_t size) { memset(backing_base+phys,0,size); }
+static void host_discard(uint64_t phys, uint64_t size) { commit_backing(phys,size); memset(backing_base+phys,0,size); }
 /* Direct memory occupies [0,POOL_SIZE) of the section, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
     if (backing_base) return 0;
     runtime_memory_reserve();
     uint64_t bytes=POOL_SIZE+FLEX_SPAN;
-    section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
+    /* BB_GUEST_COMMIT_ON_MAP=1: the fallback below from the start (tests). */
+    const char *on_map=getenv("BB_GUEST_COMMIT_ON_MAP");
+    if (on_map && on_map[0]=='1') SetLastError(ERROR_COMMITMENT_LIMIT);
+    else section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
+    if (!section && (GetLastError()==ERROR_NO_SYSTEM_RESOURCES || GetLastError()==ERROR_COMMITMENT_LIMIT)) {
+        /* The pool is sized for the largest resolutions (BB_DMEM_MB, 12+ GiB) and committed at
+         * once it exceeded RAM + page file (error 1450) although the game maps much less: then
+         * it is reserved and committed as the game maps it (commit_backing). */
+        DWORD error=GetLastError();
+        section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_RESERVE,bytes,NULL,NULL,0);
+        if (section) {
+            commit_on_map=1;
+            printf("Runtime: %" PRIu64 " MiB of guest memory do not fit Windows' commit limit at once "
+                   "(error %lu): committed as the game maps it\n",bytes>>20,error);
+        }
+    }
     if (!section) { fprintf(stderr,"Runtime: cannot create %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough?\n",bytes>>20,GetLastError()); return -1; }
     backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
     return backing_base ? 0 : -1;
@@ -426,9 +528,10 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
         }
         if (!overlap) break;
     }
-    blocks[slot] = (Block){start, size, type, 1}; *out = (int64_t)start;
+    blocks[slot] = (Block){start, size, type, 1};
     ++allocations; live_bytes += size;
     write_unlock();
+    *out = (int64_t)start;
     printf("Runtime: direct allocation offset=0x%" PRIx64 ", size=%" PRIu64 " bytes, type=%d\n", start, size, type);
     return 0;
 }
@@ -442,11 +545,16 @@ static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags,
     return result;
 }
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
+    if (!out) return INVALID;
+    void *address=*out;
     write_lock();
-    int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
+    int32_t result=map_direct_locked(&address,size,prot,flags,physical,alignment);
     write_unlock();
     flush_hooks();
-    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", *out, size, prot);
+    if (!result) {
+        *out=address;
+        printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", address, size, prot);
+    }
     return result;
 }
 static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int flags, int64_t physical,
@@ -521,11 +629,14 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
     return result;
 }
 static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags) {
+    if (!inout) return INVALID;
+    void *address=*inout;
     write_lock();
-    int32_t result=map_flexible_locked(inout,size,prot,flags);
+    int32_t result=map_flexible_locked(&address,size,prot,flags);
     write_unlock();
     flush_hooks();
-    if (!result) printf("Runtime: mapped flexible memory %p, size=%" PRIu64 ", prot=0x%x\n", *inout, size, prot);
+    if (!result) *inout=address;
+    if (!result) printf("Runtime: mapped flexible memory %p, size=%" PRIu64 ", prot=0x%x\n", address, size, prot);
     else fprintf(stderr,"Runtime: flexible map of %" PRIu64 " bytes failed (0x%x), in use=%" PRIu64 "\n",
                  size, (unsigned)result, flexible_bytes);
     return result;
@@ -537,13 +648,15 @@ static ABI int32_t release_flexible(void *address, uint64_t size) { return direc
 static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_t alignment) {
     if (!alignment) alignment=PAGE;
     if (!inout || !size || size%PAGE || !valid_alignment(alignment)) return INVALID;
+    void *address=*inout;
     write_lock();
-    if ((flags & MAP_FIXED_FLAG) && overlaps((uintptr_t)*inout,(uintptr_t)*inout+size,0)) {
+    if ((flags & MAP_FIXED_FLAG) && overlaps((uintptr_t)address,(uintptr_t)address+size,0)) {
         write_unlock(); return NO_MEMORY;
     }
-    int32_t result=place(inout,size,0,flags,alignment,KIND_RESERVED,0,0);
+    int32_t result=place(&address,size,0,flags,alignment,KIND_RESERVED,0,0);
     write_unlock();
-    if (!result) printf("Runtime: reserved virtual range %p, size=%" PRIu64 "\n", *inout, size);
+    if (!result) *inout=address;
+    if (!result) printf("Runtime: reserved virtual range %p, size=%" PRIu64 "\n", address, size);
     return result;
 }
 static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {
@@ -575,11 +688,13 @@ static ABI int32_t query_protection(void *address, void **start, void **end, uin
     size_t first=i, last=i;
     while (first && vmas[first-1].end==vmas[first].start && vmas[first-1].kind!=KIND_RESERVED && vmas[first-1].prot==vmas[i].prot) --first;
     while (last+1<vma_count && vmas[last+1].start==vmas[last].end && vmas[last+1].kind!=KIND_RESERVED && vmas[last+1].prot==vmas[i].prot) ++last;
-    if (start) *start=(void *)vmas[first].start;
-    if (end) *end=(void *)vmas[last].end;
-    if (prot) *prot=(uint32_t)vmas[i].prot;
+    const uintptr_t run_start=vmas[first].start, run_end=vmas[last].end;
+    const uint32_t run_prot=(uint32_t)vmas[i].prot;
     __atomic_add_fetch(&queries,1,__ATOMIC_RELAXED);
     read_unlock();
+    if (start) *start=(void *)run_start;
+    if (end) *end=(void *)run_end;
+    if (prot) *prot=run_prot;
     return 0;
 }
 static ABI int32_t virtual_query(const void *address, int flags, VirtualQueryInfo *info, uint64_t info_size) {
@@ -588,33 +703,38 @@ static ABI int32_t virtual_query(const void *address, int flags, VirtualQueryInf
     size_t i=vma_index((uintptr_t)address);
     if (i==vma_count || (vmas[i].start>(uintptr_t)address && !(flags & 1))) { read_unlock(); return ACCESS; }
     Vma v=vmas[i];
+    __atomic_add_fetch(&queries,1,__ATOMIC_RELAXED);
+    read_unlock();
     memset(info,0,sizeof(*info));
     info->start=v.start; info->end=v.end;
     info->offset=v.kind==KIND_DIRECT ? v.phys : 0;
     info->protection=v.prot; info->memory_type=v.type;
     info->flags=(v.kind==KIND_FLEXIBLE ? 1u : 0) | (v.kind==KIND_DIRECT ? 2u : 0) | (v.kind!=KIND_RESERVED ? 16u : 0);
     strcpy(info->name, v.kind==KIND_RESERVED ? "reserved" : v.kind==KIND_DIRECT ? "direct" : "flexible");
-    __atomic_add_fetch(&queries,1,__ATOMIC_RELAXED);
-    read_unlock();
     return 0;
 }
 static ABI int32_t direct_memory_type(uint64_t phys, int *type, void **start, void **end) {
     read_lock();
     for (int i=0;i<LIMIT;++i) if (blocks[i].used && phys>=blocks[i].start && phys-blocks[i].start<blocks[i].size) {
-        if (type) *type=blocks[i].type;
-        if (start) *start=(void *)(uintptr_t)blocks[i].start;
-        if (end) *end=(void *)(uintptr_t)(blocks[i].start+blocks[i].size);
-        read_unlock(); return 0;
+        const Block b=blocks[i];
+        read_unlock();
+        if (type) *type=b.type;
+        if (start) *start=(void *)(uintptr_t)b.start;
+        if (end) *end=(void *)(uintptr_t)(b.start+b.size);
+        return 0;
     }
     read_unlock();
     return ACCESS;
 }
 static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, int flags) {
     if (!entries || count<0) return INVALID;
+    BatchEntry *copy=malloc((size_t)(count ? count : 1)*sizeof(*copy));
+    if (!copy) return NO_MEMORY;
+    memcpy(copy,entries,(size_t)count*sizeof(*copy));
     int32_t result=0; int done=0;
     write_lock();
     for (; done<count; ++done) {
-        BatchEntry *e=&entries[done];
+        BatchEntry *e=&copy[done];
         switch (e->operation) {
         case 0: result=map_direct_locked(&e->start,e->length,(uint8_t)e->prot,flags,(int64_t)e->offset,0); break;
         case 1: result=unmap_locked((uintptr_t)e->start,e->length); break;
@@ -627,6 +747,8 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
     }
     write_unlock();
     flush_hooks();
+    for (int i=0; i<done; ++i) entries[i].start=copy[i].start;
+    free(copy);
     if (processed) *processed=done;
     return result;
 }

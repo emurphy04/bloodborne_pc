@@ -1,10 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdio>
+#include <boost/container/small_vector.hpp>
 #include <xxhash.h>
 
+#include "bbport_overlay.h"
 #include "bbport_process_memory.h"
+#include "bbport_prompts.h"
 #include "bbport_toggles.h"
+#include "bbport_vram_warning.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -20,6 +26,7 @@
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
+#include <vk_mem_alloc.h>
 
 namespace VideoCore {
 
@@ -59,7 +66,25 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     critical_gc_memory = static_cast<u64>(
         std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       DEFAULT_CRITICAL_GC_MEMORY));
+    // bbport: below 8 GB the pressure mark was 40% of the budget (1.9 GB on a 6 GB card), under
+    // what the game holds outside textures (~2.2 GB: its memory's backing, upscaler, swapchain):
+    // such cards were under pressure all session, evicting textures unused for 5 s and uploading
+    // them again. 60% (BB_GC_PRESSURE_PERCENT) leaves the textures of an area room first.
+    if (device_local_memory < TARGET_GC_THRESHOLD) {
+        static const s64 percent = [] {
+            const char* env = std::getenv("BB_GC_PRESSURE_PERCENT");
+            return std::clamp<s64>(env ? std::strtoll(env, nullptr, 10) : 60, 10, 75);
+        }();
+        pressure_gc_memory = std::max<u64>(pressure_gc_memory,
+                                           static_cast<u64>(device_local_memory / 100 * percent));
+    }
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    // bbport: the marks in the log, so a player's log tells where eviction starts on that card.
+    std::printf("Texture cache: VRAM budget %lld MiB; marks: collect %llu, pressure %llu, critical %llu MiB\n",
+                static_cast<long long>(device_local_memory >> 20),
+                static_cast<unsigned long long>(trigger_gc_memory >> 20),
+                static_cast<unsigned long long>(pressure_gc_memory >> 20),
+                static_cast<unsigned long long>(critical_gc_memory >> 20));
 }
 
 TextureCache::~TextureCache() = default;
@@ -235,7 +260,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
-        const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
+        const auto new_image_id = InsertImage(new_info);
         RegisterImage(new_image_id);
 
         // insert() may have grown slot_images and moved every image: `cache_image` would then
@@ -490,7 +515,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 }
 
 ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
-    const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, info);
+    const auto new_image_id = InsertImage(info);
     RegisterImage(new_image_id);
 
     auto& src_image = slot_images[image_id];
@@ -506,6 +531,39 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     FreeImage(image_id);
     TrackImage(new_image_id);
     return new_image_id;
+}
+
+/// bbport: a view never reaches past the image it resolved to. An overlap resolved to an
+/// existing image with fewer mips or layers (same address, another format or a smaller size),
+/// or a shader's constant mip index, left the descriptor's range beyond it: the barriers for
+/// the range asserted (image.cpp GetBarriers, after travelling to another area) and the Vulkan
+/// view was invalid. The first clamps are reported.
+static void ClampViewRange(TextureCache::ImageDesc& desc, const Image& image) {
+    auto& range = desc.view_info.range;
+    // In u32 throughout: the counts are u16 since 1.9 (u32 before).
+    const u32 levels = std::max<u32>(image.info.resources.levels, 1u);
+    const u32 layers = std::max<u32>(image.info.resources.layers, 1u);
+    if (u32(range.base.level) + range.extent.levels <= levels &&
+        u32(range.base.layer) + range.extent.layers <= layers) {
+        return;
+    }
+    static std::atomic<u32> reported{0};
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+        std::printf("Texture cache: view mips %u+%u layers %u+%u clamped to image %#llx "
+                    "(%u mips, %u layers, %s; requested %s)\n",
+                    range.base.level, range.extent.levels, range.base.layer, range.extent.layers,
+                    (unsigned long long)image.info.guest_address, levels, layers,
+                    vk::to_string(image.info.pixel_format).c_str(),
+                    vk::to_string(desc.info.pixel_format).c_str());
+    }
+    const u32 level = std::min<u32>(range.base.level, levels - 1);
+    const u32 layer = std::min<u32>(range.base.layer, layers - 1);
+    range.base.level = static_cast<decltype(range.base.level)>(level);
+    range.base.layer = static_cast<decltype(range.base.layer)>(layer);
+    range.extent.levels = static_cast<decltype(range.extent.levels)>(
+        std::clamp<u32>(range.extent.levels, 1u, levels - level));
+    range.extent.layers = static_cast<decltype(range.extent.layers)>(
+        std::clamp<u32>(range.extent.layers, 1u, layers - layer));
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
@@ -549,6 +607,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         if (cached.view_slice > 0) {
             desc.view_info.range.base.layer = cached.view_slice;
         }
+        ClampViewRange(desc, image);
         return cached.image_id;
     }
 
@@ -613,7 +672,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
-        image_id = slot_images.insert(instance, runtime, slot_image_views, info);
+        image_id = InsertImage(info);
         RegisterImage(image_id);
     }
 
@@ -628,6 +687,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     if (view_slice > 0) {
         desc.view_info.range.base.layer = view_slice;
     }
+    ClampViewRange(desc, image);
 
     cached = FindImageCacheEntry{
         .address = info.guest_address,
@@ -761,7 +821,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             info.guest_address = desc.info.stencil_addr;
             info.guest_size = desc.info.stencil_size;
             info.size = desc.info.size;
-            stencil_id = slot_images.insert(instance, runtime, slot_image_views, info);
+            stencil_id = InsertImage(info);
             RegisterImage(stencil_id);
         }
         Image& stencil_image = slot_images[stencil_id];
@@ -782,6 +842,11 @@ void TextureCache::RefreshImage(Image& image) {
 
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
+
+    // bbport: the game's key-guide icons are found for button prompts that follow the input
+    // device (bbport_prompts.cpp, which swaps them from the window thread).
+    BbPrompts::OnUpload(image.info.guest_address, image.info.mips_layout[0].size, image.info.size.width,
+                        image.info.size.height, image.info.resources.levels, image.info.num_bits);
 
     if (True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
         False(image.flags & ImageFlagBits::CpuDirty)) {
@@ -816,11 +881,16 @@ void TextureCache::RefreshImage(Image& image) {
         // character creation preview went black after one frame).
         // Only for images the GPU writes or may write (small ones, targets, storage images): a
         // streamed texture hashed here cost the GPU thread its whole size again on every upload.
-        const bool track = (is_gpu_modified && !is_gpu_dirty) || mip_size <= 64_KB ||
-                           image.usage.storage || image.usage.render_target ||
-                           image.usage.depth_target;
+        // Only guest memory that is mapped: the upload reads unmapped pages as zeros
+        // (CopySparseMemory), a hash of them faulted (a texture in unmapped memory right after
+        // Continue loaded the save).
+        const u8* mip_addr = std::bit_cast<u8*>(image.info.guest_address) + mip_offset;
+        const bool track = ((is_gpu_modified && !is_gpu_dirty) || mip_size <= 64_KB ||
+                            image.usage.storage || image.usage.render_target ||
+                            image.usage.depth_target) &&
+                           Core::Memory::Instance()->ClampRangeSize(VAddr(mip_addr), mip_size) ==
+                               mip_size;
         if (track) {
-            const u8* mip_addr = std::bit_cast<u8*>(image.info.guest_address) + mip_offset;
             const u64 mip_hash = XXH3_64bits(mip_addr, mip_size);
             if (is_gpu_modified && !is_gpu_dirty && image.mip_hashes[m] == mip_hash) {
                 continue;
@@ -1061,37 +1131,106 @@ void TextureCache::ReportMemory() {
     }
     const u64 vram = instance.CanReportMemoryUsage() ? instance.GetDeviceMemoryUsage() : 0;
     const auto process = BbProcessMemory::Get();
-    std::printf("Memory: VRAM %llu MiB; textures %llu (%llu MiB), unused for a minute %llu "
-                "(%llu MiB), of them GPU-written tiled %llu (%llu MiB); process %llu MiB "
-                "committed, %llu MiB in RAM\n",
+    std::printf("Memory: VRAM %llu MiB; textures %llu (%llu MiB), game memory backing %llu MiB "
+                "(reserve %llu of %llu MiB used), unused for a minute %llu (%llu MiB), of them "
+                "GPU-written tiled %llu (%llu MiB); process %llu MiB committed, %llu MiB in RAM\n",
                 (unsigned long long)(vram >> 20), (unsigned long long)image_count,
-                (unsigned long long)(image_bytes >> 20), (unsigned long long)idle,
+                (unsigned long long)(image_bytes >> 20),
+                (unsigned long long)(buffer_cache.ArenaBackedBytes() >> 20),
+                (unsigned long long)(buffer_cache.ArenaReserveUsedBytes() >> 20),
+                (unsigned long long)(buffer_cache.ArenaReserveBytes() >> 20),
+                (unsigned long long)idle,
                 (unsigned long long)(idle_bytes >> 20), (unsigned long long)kept,
                 (unsigned long long)(kept_bytes >> 20),
                 (unsigned long long)(process.private_bytes >> 20),
                 (unsigned long long)(process.working_set >> 20));
     std::fflush(stdout);
+    // bbport: BB_VMA_DUMP=<file> (the benchmark's vram.json): the allocator's detailed statistics
+    // (every allocation, its type, size and usage) written there with each memory line.
+    static const char* vma_dump = std::getenv("BB_VMA_DUMP");
+    if (vma_dump && vma_dump[0]) {
+        char* stats = nullptr;
+        vmaBuildStatsString(instance.GetAllocator(), &stats, VK_TRUE);
+        if (FILE* file = std::fopen(vma_dump, "wb")) {
+            std::fputs(stats, file);
+            std::fclose(file);
+        }
+        vmaFreeStatsString(instance.GetAllocator(), stats);
+    }
 }
 
 void TextureCache::GarbageCollectImages() {
+    // bbport: BB_GC_BUDGET_MB=N forces a fixed budget on any GPU (tests on a desktop, the
+    // low-VRAM profile); the marks and the VRAM warning below follow it.
+    static const u64 forced_budget = [] {
+        const char* env = std::getenv("BB_GC_BUDGET_MB");
+        return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
+    }();
     if (instance.CanReportMemoryUsage()) {
-        total_used_memory = instance.GetDeviceMemoryUsage();
+        u64 mem_budget_now = 0;
+        instance.GetDeviceMemoryStats(total_used_memory, mem_budget_now);
+        // bbport: the buffer cache's reserve (512 MiB of VRAM allocated at start for the game's
+        // memory once VRAM is full) is not in use until then: counted, it put 6 GB cards half a
+        // gigabyte closer to the marks than textures make them.
+        const u64 reserve_free =
+            buffer_cache.ArenaReserveBytes() - buffer_cache.ArenaReserveUsedBytes();
+        total_used_memory -= std::min(total_used_memory, reserve_free);
+        // bbport: what the card can still give this process, beyond the port's own budget. The
+        // driver's budget already has other applications and its own reserve subtracted, so this
+        // is the honest "is the card full" number: the budget the marks use is deliberately
+        // conservative. Also after the reserve correction, so an untouched reserve does not read
+        // as taken.
+        const u64 card_free =
+            mem_budget_now > total_used_memory ? mem_budget_now - total_used_memory : 0;
         // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
         // much more than images (buffers backing guest memory), and the startup budget left
         // ~1 GB after its 8 GB system reserve: usage stayed above the critical mark, so the
         // collector evicted images used two or three frames ago on every submission and wrote
         // GPU-written ones back. Compare with the driver's current budget instead.
-        // BB_GC_BUDGET_MB=N: this rule with a fixed budget on any GPU (tests on a desktop).
-        static const u64 forced_budget = [] {
-            const char* env = std::getenv("BB_GC_BUDGET_MB");
-            return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
-        }();
         if (instance.IsIntegrated() || forced_budget) {
             const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
             if (budget != 0) {
                 trigger_gc_memory = budget / 10 * 7;
                 pressure_gc_memory = budget / 100 * 85;
                 critical_gc_memory = budget / 100 * 95;
+            }
+        }
+        // bbport: tell the player before the card is full, 1.5 GB ahead by default
+        // (BB_VRAM_WARN_MB, 0 turns it off) but not before the critical mark, again each 256 MiB
+        // closer (bbport_vram_warning.h). Nothing is blocked: the game still closes when it runs
+        // out, but the player has time to save. Discrete cards only - an integrated GPU's limit
+        // is the system's memory, which is not this crash.
+        static const u64 warn_mb = [] {
+            const char* env = std::getenv("BB_VRAM_WARN_MB");
+            return env ? std::strtoull(env, nullptr, 10) : 1536;
+        }();
+        // bbport: the FPS counter's readout: in use, and the limit the collector holds itself
+        // to. The same numbers the warning below is based on. On an integrated GPU the limit is
+        // the system-memory heap the GPU allocates from, which is the right number there too.
+        const u64 limit = forced_budget ? forced_budget : instance.GetTotalMemoryBudget();
+        BbOverlay::SetVramUsage(total_used_memory, limit, pressure_gc_memory,
+                                critical_gc_memory, card_free);
+        if (warn_mb != 0 && !instance.IsIntegrated()) {
+            const u64 free = limit > total_used_memory ? limit - total_used_memory : 0;
+            static BbVramWarning::State warning;
+            if (warning.Check(free,
+                              BbVramWarning::Margin(limit, critical_gc_memory, warn_mb << 20))) {
+                // MB below a gigabyte: "780 MB" is more use near the end than "0.8 GB".
+                const auto size = [](u64 bytes) {
+                    return bytes >= 1_GB ? fmt::format("{:.1f} GB", double(bytes) / double(1_GB))
+                                         : fmt::format("{} MB", bytes >> 20);
+                };
+                BbOverlay::Warn(
+                    "Video memory is running low",
+                    fmt::format("{} left of {} (card: {} free).\nSave now: the game can still "
+                                "close. Lower resolution or upscaler frees the most.",
+                                size(free), size(limit), size(card_free)),
+                    limit != 0 ? float(double(total_used_memory) / double(limit)) : -1.0f);
+                std::printf("VRAM: %llu MiB free of %llu MiB (%llu MiB in use), warned the player "
+                            "to save\n",
+                            static_cast<unsigned long long>(free >> 20),
+                            static_cast<unsigned long long>(limit >> 20),
+                            static_cast<unsigned long long>(total_used_memory >> 20));
             }
         }
     }
@@ -1116,9 +1255,20 @@ void TextureCache::GarbageCollectImages() {
         const char* env = std::getenv("BB_GC_IDLE_SECONDS");
         return std::clamp<u64>(env ? std::strtoull(env, nullptr, 10) : 20, 1, 63);
     }();
+    // Under pressure an image goes once unused for BB_GC_PRESSURE_IDLE_SECONDS (5), over the
+    // critical mark for 1 s first, and only then by submissions (a fraction of a second). On
+    // smaller cards the usage stayed over the pressure mark, so textures off screen for a moment
+    // were evicted and uploaded again over the bus: the frame rate fell the longer the game
+    // ran. (bbport 0.5, deadinside28/bloodborne_pc c7e3e55, via parsifal295's PR #63.)
+    static const u64 pressure_idle_seconds = [] {
+        const char* env = std::getenv("BB_GC_PRESSURE_IDLE_SECONDS");
+        return std::clamp<u64>(env ? std::strtoull(env, nullptr, 10) : 5, 0, 63);
+    }();
     // The tick at the start of that second (an older one where no submission came then).
-    const u64 idle_tick =
-        gc_tick_at_second[(second - idle_seconds) % gc_tick_at_second.size()];
+    const auto tick_seconds_ago = [&](u64 seconds) {
+        return gc_tick_at_second[(second - seconds) % gc_tick_at_second.size()];
+    };
+    const u64 idle_tick = tick_seconds_ago(idle_seconds);
     // Last used a minute ago or more (lru_touched_tick: real use, not the collector's Touch).
     const u64 minute_tick = gc_tick_at_second[(second - 60) % gc_tick_at_second.size()];
     std::scoped_lock lock{mutex};
@@ -1128,13 +1278,26 @@ void TextureCache::GarbageCollectImages() {
     size_t num_deletions = 0;
     u32 visited = 0;
 
-    const auto configure = [&](bool allow_aggressive) {
-        pressured = total_used_memory >= pressure_gc_memory;
-        aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
+    // bbport: a mark counts only where evicting textures can bring the usage under it, at most half
+    // of them. On 8 GB cards the game's other memory alone (~4 GB at 1440p: its memory's backing,
+    // the upscaler) sat over the pressure mark, the usage hardly fell with what was evicted, and
+    // every texture unused for 5 s went and was uploaded again all session: 1200-3000 a minute in
+    // the players' logs. There the idle rule goes on (unused for BB_GC_IDLE_SECONDS).
+    // BbToggle::GcRelievable set: every mark counts, as before.
+    const auto relievable = [&](u64 mark) {
+        return BbToggle::Disabled(BbToggle::GcRelievable) || total_used_memory - mark < image_bytes / 2;
+    };
+    // emergency: still over the critical mark after evicting what was unused for a second.
+    const auto configure = [&](bool allow_aggressive, bool emergency = false) {
+        pressured = total_used_memory >= pressure_gc_memory && relievable(pressure_gc_memory);
+        aggresive = allow_aggressive && total_used_memory >= critical_gc_memory &&
+                    relievable(critical_gc_memory);
         const u64 ticks_to_destroy = std::min<u64>(aggresive ? 160 : pressured ? 80 : 16, gc_tick);
         below_tick = gc_tick - ticks_to_destroy;
         if (!pressured && !aggresive) {
             below_tick = std::min(below_tick, idle_tick);
+        } else if (!emergency) {
+            below_tick = std::min(below_tick, tick_seconds_ago(aggresive ? 1 : pressure_idle_seconds));
         }
         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
         visited = 0;
@@ -1151,9 +1314,17 @@ void TextureCache::GarbageCollectImages() {
         // in line. The oldest ten being such render targets stopped the collector for good, and
         // VRAM grew with every area visited up to the pressure mark (~10 GB on 16 GB; a 6 GB
         // card stayed over its critical mark with 0 evictions until ErrorOutOfDeviceMemory).
-        // Past the critical mark, one unused for a minute goes all the same, unwritten (render
-        // targets of an area left behind): out of VRAM the game would crash instead.
-        const bool drop = tiled && download && aggresive && image.lru_touched_tick < minute_tick;
+        // Past the critical mark, one unused for a minute went all the same, unwritten (render
+        // targets of an area left behind).
+        // bbport: not by default any more (BB_GC_DROP_OLD=1): dropped, a render target the game
+        // still read lost its contents (black screen with sound on entering the Hunter's Dream,
+        // 6 GB cards). Kept, an image past the VRAM budget goes to system memory (UniqueImage).
+        static const bool drop_old = [] {
+            const char* env = std::getenv("BB_GC_DROP_OLD");
+            return env && env[0] == '1';
+        }();
+        const bool drop = drop_old && tiled && download && aggresive &&
+                          image.lru_touched_tick < minute_tick;
         if (!drop && ((tiled && download) || (download && !pressured))) {
             if (tiled && download) {
                 ++gc_kept;
@@ -1199,6 +1370,11 @@ void TextureCache::GarbageCollectImages() {
         gc_kept = gc_kept_bytes = 0;
         lru_cache.ForEachItemBelow(below_tick, clean_up);
     }
+    if (total_used_memory >= critical_gc_memory) {
+        // Still over it: what was used a moment ago goes too (out of memory otherwise).
+        configure(true, true);
+        lru_cache.ForEachItemBelow(below_tick, clean_up);
+    }
     // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
     if (pressured || gc_downloads != 0) {
         const auto now = std::chrono::steady_clock::now();
@@ -1214,6 +1390,18 @@ void TextureCache::GarbageCollectImages() {
                         (unsigned long long)gc_dropped);
             gc_report_time = now;
             gc_evictions = gc_downloads = gc_dropped = 0;
+        }
+    } else if (gc_evictions != 0) {
+        // bbport: evictions by the idle rule too (at most every 5 s), so two runs compare.
+        const auto now = std::chrono::steady_clock::now();
+        if (now - gc_report_time >= std::chrono::seconds(5)) {
+            std::printf("Texture cache: %llu of %llu MiB: %llu idle images evicted since the last report "
+                        "(textures %llu MiB)\n",
+                        (unsigned long long)(total_used_memory >> 20),
+                        (unsigned long long)(pressure_gc_memory >> 20),
+                        (unsigned long long)gc_evictions, (unsigned long long)(image_bytes >> 20));
+            gc_report_time = now;
+            gc_evictions = 0;
         }
     }
 }
@@ -1275,7 +1463,81 @@ void TextureCache::TouchImage(const Image& image) {
     lru_cache.Touch(image.lru_id, gc_tick);
 }
 
-void TextureCache::DeleteImage(ImageId image_id) {
+ImageId TextureCache::InsertImage(const ImageInfo& info) {
+    const ImageId image_id = slot_images.insert(instance, runtime, slot_image_views, info);
+    if (!slot_images[image_id].allocation_failed) [[likely]] {
+        return image_id;
+    }
+    // bbport: the GPU has no memory left for it, past the driver's budget too (4 GB cards, on
+    // entering a big area or the Hunter's Dream). Unused textures go at once, more each round,
+    // before the image is given up on: a moment's stutter instead of the game ending.
+    u64 freed = 0;
+    for (u64 want : {u64(64) << 20, u64(256) << 20, u64(1024) << 20}) {
+        want = std::max<u64>(want, u64(info.guest_size) * 2);
+        freed += ReclaimMemoryFor(info.guest_address, info.guest_size, want);
+        if (slot_images[image_id].RetryAllocation()) {
+            static int reported = 0;
+            if (reported < 8) {
+                ++reported;
+                std::printf("GPU: video memory full: %llu MiB of unused textures freed for a "
+                            "new %ux%u image\n",
+                            (unsigned long long)(freed >> 20), info.size.width, info.size.height);
+                std::fflush(stdout);
+            }
+            return image_id;
+        }
+    }
+    std::printf("GPU: video memory full: no memory for a %ux%u image after freeing %llu MiB of "
+                "unused textures\n",
+                info.size.width, info.size.height, (unsigned long long)(freed >> 20));
+    std::fflush(stdout);
+    UNREACHABLE_MSG("Failed allocating image with error {}",
+                    vk::to_string(vk::Result::eErrorOutOfDeviceMemory));
+    return image_id;
+}
+
+u64 TextureCache::ReclaimMemoryFor(VAddr addr, size_t size, u64 bytes) {
+    // Unused for 2 s: in no command buffer still being recorded, and with WaitSubmitted in
+    // none the GPU is still running, so destroying it at once is safe. Images holding GPU
+    // results (render targets) stay: writing them back here would stall in the middle of a
+    // draw; textures are uploaded again from guest memory when next used.
+    const u64 second = u64(std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count());
+    const u64 unused_tick =
+        std::min(gc_tick, gc_tick_at_second[(second - 2) % gc_tick_at_second.size()]);
+    boost::container::small_vector<ImageId, 64> victims;
+    u64 freed = 0;
+    lru_cache.ForEachItemBelow(unused_tick, [&](ImageId image_id) {
+        if (freed >= bytes) {
+            return true;
+        }
+        const Image& image = slot_images[image_id];
+        // No backing (an undefined format): it holds no memory.
+        if (!image.backing || image.lru_touched_tick >= unused_tick ||
+            True(image.flags & ImageFlagBits::GpuModified) ||
+            image.scene_proxy || image.usage.vo_surface || image.binding.is_bound ||
+            image.binding.is_target || image.allocation_failed || image.Overlaps(addr, size)) {
+            return false;
+        }
+        victims.push_back(image_id);
+        freed += Common::AlignUp(image.GetHostImageSize(), 1024);
+        return false;
+    });
+    if (victims.empty()) {
+        return 0;
+    }
+    scheduler.WaitSubmitted();
+    for (const ImageId image_id : victims) {
+        UntrackImage(image_id);
+        UnregisterImage(image_id);
+        DeleteImage(image_id, true);
+        ++gc_evictions;
+    }
+    return freed;
+}
+
+void TextureCache::DeleteImage(ImageId image_id, bool now) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
@@ -1300,15 +1562,21 @@ void TextureCache::DeleteImage(ImageId image_id) {
     }
 
     // Reclaim image and any image views it references.
-    scheduler.DeferOperation([this, image_id] {
-        Image& image = slot_images[image_id];
-        for (auto& backing : image.backing_images) {
-            for (const ImageViewId image_view_id : backing.image_view_ids) {
-                slot_image_views.erase(image_view_id);
-            }
+    if (now) {
+        EraseImage(image_id);
+        return;
+    }
+    scheduler.DeferOperation([this, image_id] { EraseImage(image_id); });
+}
+
+void TextureCache::EraseImage(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    for (auto& backing : image.backing_images) {
+        for (const ImageViewId image_view_id : backing.image_view_ids) {
+            slot_image_views.erase(image_view_id);
         }
-        slot_images.erase(image_id);
-    });
+    }
+    slot_images.erase(image_id);
 }
 
 } // namespace VideoCore

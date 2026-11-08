@@ -4,6 +4,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include "bbport_pad_use.h"
 #include "common/types.h"
 
 struct SDL_Window;
@@ -41,6 +42,11 @@ public:
     SDL_Window* GetSDLWindow() const { return window; }
     WindowSystemInfo GetWindowInfo() const { return window_info; }
     bool IsOpen() const { return is_open.load(std::memory_order_relaxed); }
+    /// Windows only: the window is on a display that Windows runs in HDR, where the desktop
+    /// decodes an SDR swapchain with the sRGB curve instead of the display's gamma 2.2.
+    bool IsOnHdrDisplay() const { return on_hdr_display.load(std::memory_order_relaxed); }
+    /// Any thread: whether the window has keyboard focus (mute_unfocused).
+    bool IsFocused() const { return window_focused.load(std::memory_order_relaxed); }
     /// Processes pending window events. Returns false once the user closed the window.
     bool PollEvents();
     /// Keyboard text entry for the system IME dialog; typed text shows in the title bar.
@@ -63,6 +69,7 @@ public:
 private:
     std::atomic<s32> width, height;
     std::atomic<bool> is_open{true};
+    std::atomic<bool> on_hdr_display{false};
     std::mutex text_mutex;
     bool text_requested{}, text_active{};
     int text_state{};
@@ -88,7 +95,7 @@ private:
     std::atomic<int32_t> toggle_scancode{0};
     std::atomic<int32_t> reload_scancode{0};
     std::atomic<bool> reload_requested{false};      // HOT-003, drained by TakeInputReloadRequested
-    bool window_focused{true};
+    std::atomic<bool> window_focused{true};
     /// Window thread, every PollEvents: MOU-003. True iff mouse mode is on, the window has
     /// focus, and neither the menu nor the text dialog is capturing input.
     bool WantsMouseCapture() const;
@@ -97,6 +104,16 @@ private:
     /// (MOU-004, MOU-005) so no stale motion or held button survives into the next capture.
     void UpdateMouseCapture();
     bool mouse_captured_last{false};
+    /// Window thread, every PollEvents: hides the cursor when the controller was used (button,
+    /// or a stick or trigger past half) and shows it again on mouse movement, a click or the
+    /// wheel; while the mouse is captured, relative mode hides it already.
+    void UpdateCursor(bool pad_used, bool mouse_used);
+    bool cursor_hidden{false};
+    /// Window thread: each controller's sticks, triggers and held buttons as its events left them.
+    /// Mouse input while one is in use comes from the controller through a mapping program (Steam's
+    /// desktop layout, reWASD, JoyToKey...): it neither brings the cursor back, nor switches the
+    /// button prompts, nor turns the camera.
+    BbPadUse::Pads pads;
     /// Window thread, every PollEvents: installs/removes the direct camera hook
     /// (bloodborne_cam.h) to match input.ini and the F7 toggle, and gates the BbMouse sampler.
     void UpdateMouseCamera();
